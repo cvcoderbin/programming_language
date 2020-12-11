@@ -1193,3 +1193,39 @@ I want to call out special thanks to Gor Nishanov for patiently and enthusiastic
 And also to Eric Niebler for reviewing and providing feedback on an early draft of this post.
 
 此外，还有 Eric Niebler 对本文的早期草稿进行审核并提供反馈
+
+# C++ Coroutines: Understanding the promise type
+
+Sep 5, 2018
+
+This post is the third in the series on the C++ Coroutines TS ([N4736](http://wg21.link/N4736)).
+
+这是C++ Coroutine TS （N4736）系列文章的第三篇。
+
+The previous articles in this series cover:
+
+- [Coroutine Theory](https://lewissbaker.github.io/2017/09/25/coroutine-theory)
+- [Understanding operator co_await](https://lewissbaker.github.io/2017/11/17/understanding-operator-co-await)
+
+本系列的前几篇文章分别是：
+
+- [Coroutine Theory](https://lewissbaker.github.io/2017/09/25/coroutine-theory)
+- [Understanding operator co_await](https://lewissbaker.github.io/2017/11/17/understanding-operator-co-await)
+
+In this post I look at the mechanics of how the compiler translates coroutine code that you write into compiled code and how you can customise the behaviour of a coroutine by defining your own **Promise** type.
+
+在这篇文章中，我将探讨编译器是如何将你编写的协程代码转化成被编译的代码的，以及如何通过定义自己的 **Promise** 类型来定义协程的行为。
+
+## Coroutine Concepts
+
+The Coroutines TS adds three new keywords: `co_await`, `co_yield` and `co_return`. Whenever you use one of these coroutine keywords in the body of a function this triggers the compiler to compile this function as a coroutine rather than as a normal function.
+
+Coroutine TS 中新添了三个关键字：`co_await`，`co_yield` 和 `co_return`。每当你在函数体中使用这些协程关键字时，都会触发编译器将该函数作为协程而不是普通函数进行编译。
+
+The compiler applies some fairly mechanical transformations to the code that you write to turn it into a state-machine that allows it to suspend execution at particular points within the function and then later resume execution.
+
+编译器会对你编写的代码就行一些相当机械的转换，以将其转换成状态机，从而使其可以在函数内特定地方挂起，然后在恢复执行。
+
+In the previous post I described the first of two new interfaces that the Coroutines TS introduces: The **Awaitable** interface. The second interface that the TS introduces that is important to this code transformation is the **Promise** interface.
+
+在前一篇文章中，我介绍了 Coroutine TS 引入的两个新接口中的第一个：**Awaitable** 接口。第二个接口是在 TS 描述中
