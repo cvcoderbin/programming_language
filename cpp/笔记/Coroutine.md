@@ -1229,3 +1229,1295 @@ The compiler applies some fairly mechanical transformations to the code that you
 In the previous post I described the first of two new interfaces that the Coroutines TS introduces: The **Awaitable** interface. The second interface that the TS introduces that is important to this code transformation is the **Promise** interface.
 
 在前一篇文章中，我介绍了 Coroutine TS 引入的两个新接口中的第一个：**Awaitable** 接口。第二个接口是在 TS 描述中
+
+The **Promise** interface specifies methods for customising the behaviour of the coroutine itself. The library-writer is able to customise what happens when the coroutine is called, what happens when the coroutine returns (either by normal means or via an unhandled exception) and customise the behaviour of any `co_await` or `co_yield` expression within the coroutine.
+
+**Promise** 接口指定用于自定义协程自身行为的方法。库作者可以自定义调用协程时发生的事情，协程返回时（通过正常方式或者未处理的异常）发生的事情，并自定义协程中任何 `co_await` 或 `co_yield` 表达式的行为。
+
+## Promise objects
+
+The **Promise** object defines and controls the behaviour of the coroutine itself by implementing methods that are called at specific points during execution of the coroutine.
+
+ **Promise** 对象通过实现协程执行期间在特定点调用的方法来定义和控制协程本身的行为。
+
+*Before we go on, I want you to try and rid yourself of any preconceived notions of what a “promise” is. While, in some use-cases, the coroutine promise object does indeed act in a similar role to the* `std::promise` *part of a* `std::future` *pair, for other use-cases the analogy is somewhat stretched. It may be easier to think about the coroutine’s promise object as being a “coroutine state controller” object that controls the behaviour of the coroutine and can be used to track its state.*
+
+在我们继续之前，我希望你先摆脱对 “promise” 的任何先入为主的观念。虽然在某些用例中，协程 promise 对象确实扮演者与 `std::future` 中的 `std::promise` 对象相似的角色，但是在其它用例中却不适用。将协程的 promise 对象看做是可以控制协程的行为并可用来追踪器状态的 “协程状态控制器” ，这可能更容易理解。
+
+An instance of the promise object is constructed within the coroutine frame for each invocation of a coroutine function.
+
+每次调用协程函数，都会在协程帧中构建一个 promise 对象的实例。
+
+The compiler generates calls to certain methods on the promise object at key points during execution of the coroutine.
+
+编译器在协程执行的关键点上，生成对 promise 对象特定方法的调用。
+
+In the following examples, assume that the promise object created in the coroutine frame for a particular invocation of the coroutine is `promise`.
+
+在以下实例中，假定协程帧中为特定协程调用创建的 promise 对象就是 `promise`。
+
+When you write a coroutine function that has a body, `<body-statements>`, which contains one of the coroutine keywords (`co_return`, `co_await`, `co_yield`) then the body of the coroutine is transformed to something (roughly) like the following:
+
+当你写的协程函数具有 <body-statements> 时，并且其中包含了协程关键字（`co_return`，`co_awiat`， `co_yield`）中的一个，那么协程体将被（大致）转化为以下内容：
+
+```c++
+{
+    co_await promise.initial_suspend();
+    try
+    {
+        <body_statements>
+    }
+    catch
+    {
+        promise.unhandled_exception();
+    }
+FinalSuspend:
+    co_await promise.final_suspend();
+}
+```
+
+When a coroutine function is called there are a number of steps that are performed prior to executing the code in the source of the coroutine body that are a little different to regular functions.
+
+当调用协程函数时，在协程体中的代码执行之前执行了很多步骤，这些步骤和常规函数稍有不同。
+
+Here is a summary of the steps (I’ll go into more detail on each of the steps below).
+
+1. Allocate a coroutine frame using `operator new` (optional).
+2. Copy any function parameters to the coroutine frame.
+3. Call the constructor for the promise object of type, `P`.
+4. Call the `promise.get_return_object()` method to obtain the result to return to the caller when the coroutine first suspends. Save the result as a local variable.
+5. Call the `promise.initial_suspend()` method and `co_await` the result.
+6. When the `co_await promise.initial_suspend()` expression resumes (either immediately or asynchronously), then the coroutine starts executing the coroutine body statements that you wrote.
+
+这是步骤的摘要（我将在下面详细介绍每个步骤）。
+
+1. 使用 `operator new` 分配协程帧（可选）
+2. 将所有的函数参数复制到协程帧
+3. 调用 promise 对象类型 `P` 的构造函数
+4. 调用 `promise.get_return_object()` 方法获取结果，以便在协程首次挂起时将结果返回给调用方。将调用结果存为局部变量。
+5. 调用 `promise.init_suspend()` 方法，然后 `co_await` 结果。
+6. 当 `co_await promise.initial_suspend()` 表达式恢复时（立即或异步），协程将开始执行你编写的协程体语句。
+
+Some additional steps are executed when execution reaches a `co_return` statement:
+
+1. Call `promise.return_void()` or `promise.return_value(<expr>)`
+2. Destroy all variables with automatic storage duration in reverse order they were created.
+3. Call `promise.final_suspend()` and `co_await` the result.
+
+当执行达到 `co_return` 语句时，将执行一些额外的步骤：
+
+1. 调用 `promise.return_void()` 或 `promise.return_value(<expr>)`
+2. 以相反的顺序销毁所有具有自动存储持续时间的变量
+3. 调用 `promise.final_suspend()` ，然后 `co_await` 结果。
+
+If instead, execution leaves `<body-statements>` due to an unhandled exception then:
+
+1. Catch the exception and call `promise.unhandled_exception()` from within the catch-block.
+2. Call `promise.final_suspend()` and `co_await` the result.
+
+如果由于异常没有被处理而未执行 `<body-statements>` ，将执行：
+
+1. 捕获异常并在 catch-block 中调用 `promise.unhandled_exception()`。
+2. 调用 `promise.final_suspend()`，然后 `co_await` 结果。
+
+Once execution propagates outside of the coroutine body then the coroutine frame is destroyed. Destroying the coroutine frame involves a number of steps:
+
+1. Call the destructor of the promise object.
+2. Call the destructors of the function parameter copies.
+3. Call `operator delete` to free the memory used by the coroutine frame (optional)
+4. Transfer execution back to the caller/resumer.
+
+一旦协程执行完毕，协程帧将会被销毁。销毁协程帧涉及多个步骤：
+
+1. 调用 promise 对象的析构函数
+2. 调用函数参数副本的析构函数
+3. 调用 `operator new` 释放协程帧使用的内存（可选）
+4. 将执行权转交给调用方/恢复方。
+
+When execution first reaches a `<return-to-caller-or-resumer>` point inside a `co_await` expression, or if the coroutine runs to completion without hitting a `<return-to-caller-or-resumer>` point, then the coroutine is either suspended or destroyed and the return-object previously returned from the call to `promise.get_return_object()` is then returned to the caller of the coroutine.
+
+当执行流首次到达 `co_await` 表达式内的某个 `<return-to-caller-resumer>` 点时，或者如果协程运行到完成而没有碰到 `<return-to-caller-or-resumer>` 点时，协程将会被挂起或者销毁，然后将先前通过调用 `promise.get_return_object()` 得到的对象返回给协程的调用方。
+
+### Allocating a coroutine frame
+
+First, the compiler generates a call to `operator new` to allocate memory for the coroutine frame.
+
+首先，编译器会生成一个 `operator new` 调用，用来为协程帧分配内存。
+
+If the promise type, `P`, defines a custom `operator new` method then that is called, otherwise the global `operator new` is called.
+
+如果 promise 类型 `P` 自定义了 `operator new` 方法则调用这个方法，否则将调用全局的 `operator new`。
+
+There are a few important things to note here:
+
+这里有一些重要的事情值得注意：
+
+The size passed to `operator new` is not `sizeof(P)` but is rather the size of the entire coroutine frame and is determined automatically by the compiler based on the number and sizes of parameters, size of the promise object, number and sizes of local variables and other compiler-specific storage needed for management of coroutine state.
+
+传递给 `operator new`  的大小不是 `sizeof(P)`  的大小而是整个协程帧的大小，编译器会根据参数的数量和大小，promise 对象的大小，局部变量的数量和大小以及其他管理协程状态所必须的编译器存储自动决定大小。
+
+The compiler is free to elide the call to `operator new` as an optimisation if:
+
+- it is able to determine that the lifetime of the coroutine frame is strictly nested within the lifetime of the caller; and
+- the compiler can see the size of coroutine frame required at the call-site.
+
+在以下情况，编译器可以自由的取消对 `operator new` 的调用作为优化：
+
+- 编译器可以确定协程帧的生命周期被严格的嵌套在调用者的生命周期内。
+- 编译器可以在调用点得出所需的协程帧大小
+
+In these cases, the compiler can allocate storage for the coroutine frame in the caller’s activation frame (either in the stack-frame or coroutine-frame part).
+
+在这些情况下，编译器可以在调用者的活动帧中为协程分配协程帧（协程的栈帧或者协程帧）。
+
+The Coroutines TS does not yet specify any situations in which the allocation elision is guaranteed, so you still need to write code as if the allocation of the coroutine frame may fail with `std::bad_alloc`. This also means that you usually shouldn’t declare a coroutine function as `noexcept` unless you are ok with `std::terminate()` being called if the coroutine fails to allocate memory for the coroutine frame.
+
+Coroutines TS 尚未指定什么情况下分配是有保证的，所以，你仍然需要为协程帧分配失败时可能出现的 `std::bad_alloc` 错误编写处理代码。这也意味着，你不应该将协程函数声明为 `noexcept`，除非你可以保证会在协程帧分配失败时调用 `std::terminate`。
+
+There is a fallback, however, that can be used in lieu of exceptions for handling failure to allocate the coroutine frame. This can be necessary when operating in environments where exceptions are not allowed, such as embedded environments or high-performance environments where the overhead of exceptions is not tolerated.
+
+然而，有一种退路可以替代异常来处理分配协程帧失败的情况。这在异常被禁用的环境中，例如嵌入式环境或者不允许额外开销的高性能环境中，是必须被用到。
+
+If the promise type provides a static `P::get_return_object_on_allocation_failure()` member function then the compiler will generate a call to the `operator new(size_t, nothrow_t)` overload instead. If that call returns `nullptr` then the coroutine will immediately call `P::get_return_object_on_allocation_failure()` and return the result to the caller of the coroutine instead of throwing an exception.
+
+如果 promise 类型提供了静态成员函数 `P::get_return_object_on_allocation_failure()` ，则编译器将生成对重载的 `operator new(size_t, nothrow_t)` 的调用。如果该调用返回 `nullptr`，则协程会立即调用 `P::get_return_object_on_allocation_failure()` 并将结果返回给调用者，而不是抛出异常。
+
+#### Customising coroutine frame memory allocation
+
+Your promise type can define an overload of `operator new()` that will be called instead of global-scope `operator new` if the compiler needs to allocate memory for a coroutine frame that uses your promise type.
+
+你可以为 promise 类型定义一个重载的 `operator new()`，这样，当编译器需要使用你的 promise 类型而去为协程帧分配内存时，调用的将是你定义的 `operator new()` ，而不是全局作用域中的。
+
+For example:
+
+```c++
+struct my_promise_type
+{
+  void* operator new(std::size_t)
+  {
+      void* ptr = my_custom_allocate(size);
+      if(!ptr)
+          throw std::bad_alloc{};
+      return ptr;
+  }
+  void operator delete(void* ptr, std::size_t size)
+  {
+      my_custom_free(ptr, size);
+  }
+  ...
+};
+```
+
+“But what about custom allocators?”, I hear you asking.
+
+“但是自定义分配器呢”，我听到你问。
+
+You can also provide an overload of `P::operator new()` that takes additional arguments which will be called with lvalue references to the coroutine function parameters if a suitable overload can be found. This can be used to hook up `operator new` to call an `allocate()` method on an allocator that was passed as an argument to the coroutine function.
+
+你还可以提供带有其他参数的 `P::operator new()` 的重载，如果可以找到合适的重载，则将使用对协程函数参数的左值引用来调用该重载。这可以用于 `operator new`  去调用作为参数传递给协程函数的分配器上 `allocate()` 方法。
+
+You will need to do some extra work to make a copy of the allocator inside the allocated memory so you can reference it in the corresponding call to `operator delete` since the parameters are not passed to the corresponding `operator delete` call. This is because the parameters are stored in the coroutine-frame and so they will have already been destructed by the time that `operator delete` is called.
+
+因为在调用相应的`operator delete` 的过程中没有传递参数，你需要做一些额外的工作来在分配的内存中保存 allocator 的副本，以便在相应的 `operator delete`调用中引用它。这是因为参数存储在协程帧中，因此在调用 `operator delete` 时它们已经被析构了。
+
+For example, you can implement `operator new` so that it allocates extra space after the coroutine frame and use that space to stash a copy of the allocator that can be used to free the coroutine frame memory.
+
+例如，你可以实现 `operator new` 以便它在协程帧之后分配额外的空间，并使用该空间存储可用于释放协程帧内存的 allocator 的副本。
+
+For example:
+
+```c++
+template<typename ALLOCATOR>
+struct my_promise_type
+{
+    template<typename... ARGS>
+    void* operator new(std::size_t sz, std::allocator_arg_t, ALLOCATOR& allocator, ARGS&... args)
+    {
+        //Round up sz next multiple of ALLOCATOR alignment
+        std::size_t allocatorOffset = (sz + alignof(ALLOCATOR) - 1u) & ~(alignof(ALLOCATOR) - 1u);
+        
+        // Callonto allocator to allocate space for coroutine frame.
+        void* ptr = allocator.allocate(allocatorOffset + sizeof(ALLOCATOR));
+        
+        // Take a copy of the allocator(assuming noexcept copy constructor here)
+        new (((char*)ptr) + allocatroOffset) ALLOCATOR(allocator);
+        
+        return ptr;
+    }
+    
+    void operator delete(void* ptr, std::size_t sz)
+    {
+        std::size_t allocatorOffset = (sz + alignof(ALLOCATOR) - 1u) & ~(alignof(ALLOCATOR) -1u);
+        ALLOCATOR& allocator = *reinterpret_cast<ALLOCATOR*>(((char*)prt) + allocatorOffset);
+        
+        // Move allocator to local variable first so it isn't freeing its own memory from underneath itself.
+        // Assuming allocator move constructor is noexcept here.
+        ALLOCATOR allocatorCopy = std::move(allocator);
+        
+        // But don't forget to destruct allocator object in coroutine frame.
+        allocator.~ALLOCATOR();
+        
+        // Finally, free the memory using the allocator.
+        allocatorCopy.deallocate(ptr, allocatorOffset + sizeof(ALLOCATOR));
+    }
+};
+```
+
+To hook up the custom `my_promise_type` to be used for coroutines that pass `std::allocator_arg` as the first parameter, you need to specialise the `coroutine_traits` class (see section on `coroutine_traits` below for more details).
+
+要将自定义的 `my_promise_type` 用作将 `std::allocator_arg` 作为第一个参数的协程，你需要对 `coroutine_traits` 类进行特化（更多详细信息，请见下面有关`coroutine_traits` 的部分）。
+
+```c++
+namespace std::experimental
+{
+    template<typename ALLOCATOR, typename... ARGS>
+    struct coroutine_traits<my_return_type, std::allocator_arg_t, ALLOCATOR, ARGS...>
+    {
+        using promise_type = my_promise_type<ALLOCATOR>;
+    }
+}
+```
+
+Note that even if you customise the memory allocation strategy for a coroutine, **the compiler is still allowed to elide the call to your memory allocator**.
+
+请注意，即使你为协程自定义了内存分配策略，**仍然允许编译器取消对你的内存分配器的调用**
+
+### Copying parameters to the coroutine frame
+
+The coroutine needs to copy any parameters passed to the coroutine function by the original caller into the coroutine frame so that they remain valid after the coroutine is suspended.
+
+协程需要把原始调用者传递给协程函数的所有参数复制到协程帧中，以使它们在协程挂起后仍然有效。
+
+If parameters are passed to the coroutine by value, then those parameters are copied to the coroutine frame by calling the type’s move-constructor.
+
+如果参数按值传递给协程，则通过调用它们的移动构造函数将这些参数复制到协程帧中。
+
+If parameters are passed to the coroutine by reference (either lvalue or rvalue), then only the references are copied into the coroutine frame, not the values they point to.
+
+如果参数通过引用（左值或右值）传递给协程，则仅将引用复制到协程帧中，而不是复制它们指向的值。
+
+Note that for types with trivial destructors, the compiler is free to elide the copy of the parameter if the parameter is never referenced after a reachable `<return-to-caller-or-resumer>` point in the coroutine.
+
+注意，对于带有琐碎析构函数（trivial destructors）的类型，如果协程中的参数在一个可到达`<return-to-caller-or-resumer>` 点后不在被引用，则编译器可以自由的删除该参数的副本。
+
+There are many gotchas involved when passing parameters by reference into coroutines as you cannot necessarily rely on the reference remaining valid for the lifetime of the coroutine. Many common techniques used with normal functions, such as perfect-forwarding and universal-references, can result in code that has undefined behaviour if used with coroutines. Toby Allsopp has written a [great article](https://toby-allsopp.github.io/2017/04/22/coroutines-reference-params.html) on this topic if you want more details.
+
+当通过引用将参数传递给协程时，这里会有很多陷阱，因为你不能保证在协程的生命周期内引用都保持有效。如果与协程一起使用，普通函数使用的许多常见技术，例如，完美转发和万能引用，都可能导致代码具有未定义的行为。如果你想要了解更多详细信息，Toby Allsopp 撰写过一篇很棒的[文章](https://toby-allsopp.github.io/2017/04/22/coroutines-reference-params.html)。
+
+If any of the parameter copy/move constructors throws an exception then any parameters already constructed are destructed, the coroutine frame is freed and the exception propagates back out to the caller.
+
+如果任何参数的 copy/move 构造函数抛出异常，则会破坏所有已构造的参数，协程帧也将被释放，并将异常传播回调用者。
+
+### Constructing the promise object
+
+Once all of the parameters have been copied into the coroutine frame, the coroutine then constructs the promise object.
+
+一旦所有的参数都复制到协程帧中，然后协程构造 promise 对象。
+
+The reason the parameters are copied prior to the promise object being constructed is to allow the promise object to be given access to the post-copied parameters in its constructor.
+
+在构造 promise 对象之前复制参数的原因是为了允许 promise 对象获得对后复制参数的访问权。
+
+First, the compiler checks to see if there is an overload of the promise constructor that can accept lvalue references to each of the copied parameters. If the compiler finds such an overload then the compiler generates a call to that constructor overload. If it does not find such an overload then the compiler falls back to generating a call to the promise type’s default constructor.
+
+首先，编译前先检查 promise 是否有接受每个复制参数的左值引用的构造函数重载。如果编译器发现了这样的重载，则编译器将生成对该构造函数重载的调用。如果没有找到，则编译器则会生成对 promise 类型的默认构造函数的调用。
+
+Note that the ability for the promise constructor to “peek” at the parameters was a relatively recent change to the Coroutines TS, being adopted in [N4723](http://wg21.link/N4723) at the Jacksonville 2018 meeting. See [P0914R1](http://wg21.link/P0914R1) for the proposal. Thus it may not be supported by some older versions of Clang or MSVC.
+
+注意，promise 构造函数能够“窥视（peek）”参数的功能是对 Coroutines TS 较新的改动，该更新在 2018 年 Jacksonville 会议的 [N4723](http://wg21.link/N4723) 中被采用。有关建议，请参阅 [P0914R1](http://wg21.link/P0914R1)。因此，某些较旧版本的 Clang 或 MSVC 可能不支持它。
+
+If the promise constructor throws an exception then the parameter copies are destructed and the coroutine frame freed during stack unwinding before the exception propagates out to the caller.
+
+如果 promise 构造函数抛出异常，在异常传播到调用者之前，栈展开期间将销毁参数副本并释放协程帧。
+
+### Obtaining the return object
+
+The first thing a coroutine does with the promise object is obtain the `return-object` by calling `promise.get_return_object()`.
+
+协程对 promise 对象所做的第一件事是通过调用 `promise.get_return_object()` 获得 `return-object`。
+
+The `return-object` is the value that is returned to the caller of the coroutine function when the coroutine first suspends or after it runs to completion and execution returns to the caller.
+
+`return-object` 是在协程首次挂起或运行完成时协程函数返回的值，然后执行权交还给调用者。
+
+You can think of the control flow going something (very roughly) like this:
+
+你可以想象控制流程（大致）如下：
+
+```c++
+// Pretend there's a compiler-generated structure called 'coroutine_frame'
+// that holds all of the state needed for the coroutine. It's constructor
+// takes a copy of parameters and default-constructs a promise object.
+struct coroutine_frame{...};
+
+T some_coroutine(P param)
+{
+    auto* f = new coroutine_frame(std::forward<P>(param));
+    auto returnObject = f->promise.get_return_object();
+    
+    // Start execution of the coroutine body by resume it.
+    // This call will return when the coroutine gets to the first
+    // suspend-point or when the coroutine runs to completion.
+    coroutine_handle<decltype(f->promise)>::from_promise(f->promise).resume();
+    
+    // Then the return object is returned to the caller.
+    return returnObject;
+}
+```
+
+Note that we need to obtain the return-object before starting the coroutine body since the coroutine frame (and thus the promise object) may be destroyed prior to the call to `coroutine_handle::resume()` returning, either on this thread or possibly on another thread, and so it would be unsafe to call `get_return_object()` after starting execution of the coroutine body.
+
+注意，我们需要在启动协程体之前获取 `return-object`，因为协程帧（以及对应的 promise 对象）可能在调用 `coroutine_handle::resume()` 返回之前在此线程或者可能在另一个线程上被销毁，因此在执行协程体之后调用 `get_return_object` 是不安全的。
+
+### The initial-suspend point
+
+The next thing the coroutine executes once the coroutine frame has been initialised and the return object has been obtained is execute the statement `co_await promise.initial_suspend();`.
+
+一旦初始化了协程帧并获得了返回对象，协程将要执行的下一件事是执行 `co_await promise.initial_suspend();` 语句。
+
+This allows the author of the `promise_type` to control whether the coroutine should suspend before executing the coroutine body that appears in the source code or start executing the coroutine body immediately.
+
+这使得 `promise_type` 的作者可以控制协程在执行协程体中的代码前，是挂起还是立即执行协程体。
+
+If the coroutine suspends at the initial suspend point then it can be later resumed or destroyed at a time of your choosing by calling `resume()` or `destroy()` on the coroutine’s `coroutine_handle`.
+
+如果协程在初始挂起点挂起，则可以在稍后你选择的时间通过在协程的 `coroutine_handle` 上调用 `resume()` 或 `destroy()` 恢复或销毁协程。 
+
+The result of the `co_await promise.initial_suspend()` expression is discarded so implementations should generally return `void` from the `await_resume()` method of the awaiter.
+
+`co_await promise.initial_suspend()` 表达式的记过将被丢弃，因此 awaiter 的`await_resume()` 实现通常返回 `void`。
+
+It is important to note that this statement exists outside of the `try`/`catch` block that guards the rest of the coroutine (scroll back up to the definition of the coroutine body if you’ve forgotten what it looks like). This means that any exception thrown from the `co_await promise.initial_suspend()` evaluation prior to hitting its `<return-to-caller-or-resumer>` will be thrown back to the caller of the coroutine after destroying the coroutine frame and the return object.
+
+需要非常注意的是，该语句位于 `try/catch` 语句块外部，`try/catch` 语句块保护协程的其余部分（如果忘记了具体的实现，请返回协程体的定义）。这意味着，在到达 `<return-to-caller-or-reusmer>` 之前， `co_await promise.initial_suspend()` 求值中抛出的异常将在协程帧和返回对象被销毁后返回给协程的调用者。
+
+Be aware of this if your `return-object` has RAII semantics that destroy the coroutine frame on destruction. If this is the case then you want to make sure that `co_await promise.initial_suspend()` is `noexcept` to avoid double-free of the coroutine frame.
+
+注意一点，如果返回对象具有RAII语义，它会在析构函数中销毁协程帧。如果是这种情况，你需要保证 `co_await promise.initial_suspend()` 是 `noexcept`，以避免 double-free 协程帧。
+
+*Note that there is a proposal to tweak the semantics so that either all or part of the* `co_await promise.initial_suspend()` *expression lies inside try/catch block of the coroutine-body so the exact semantics here are likely to change before coroutines are finalised.*
+
+*注意，有人建议调整语义，以使 `co_await promise.initial_suspend()` 表达式的全部或者部分位于协程体的 try/catch 块内，因此在确定协程之前，此处的确切语义可能会发生变化*
+
+For many types of coroutine, the `initial_suspend()` method either returns `std::experimental::suspend_always` (if the operation is lazily started) or `std::experimental::suspend_never` (if the operation is eagerly started) which are both `noexcept` awaitables so this is usually not an issue.
+
+对于许多类型的协程，`initial_suspend()` 方法要么返回 `std::experimental::suspend_always` （如果该操作是延迟启动的），要么返回的是 `std::experimental::suspend_never` （如果该操作是立即执行的），它们都是 `noexcept` 的 awaitables ，因此通常这不是问题。
+
+### Returning to the caller
+
+When the coroutine function reaches its first `<return-to-caller-or-resumer>` point (or if no such point is reached then when execution of the coroutine runs to completion) then the `return-object` returned from the `get_return_object()` call is returned to the caller of the coroutine.
+
+当协程函数首次达到 `<return-to-caller-resumer>` 点（或者如果没有这样的暂停点，则协程运行至完成），然后将从 `get_return_object()` 调用返回的 `return-object` 返回给协程的调用者。
+
+Note that the type of the `return-object` doesn’t need to be the same type as the return-type of the coroutine function. An implicit conversion from the `return-object` to the return-type of the coroutine is performed if necessary.
+
+注意，`return-object` 的类型不必与协程函数的返回类型相同。如果需要，可以执行 `return-object` 到协程返回类型的隐式转换。
+
+*Note that Clang’s implementation of coroutines (as of 5.0) defers executing this conversion until the return-object is returned from the coroutine call, whereas MSVC’s implementation as of 2017 Update 3 performs the conversion immediately after calling* `get_return_object()`*. Although the Coroutines TS is not explicit on the intended behaviour, I believe MSVC has plans to change their implementation to behave more like Clang’s as this enables some* [interesting use cases](https://github.com/toby-allsopp/coroutine_monad)*.*
+
+*注意，Clang的协程实现（自 5.0 开始）推迟执行此转换，直到从协程调用返回 return-object，而 2017 年 Update 3 的 MSVC 的实现则在调用 `get_return_object` 之后立即执行转换。尽管 Coroutines TS 没有明确指出预期的行为，但我相信 MSCV 计划将其实现更改为更类似 Clang 的行为，因为这可以实现一些 [有趣的用例](https://github.com/toby-allsopp/coroutine_monad)*
+
+### Returning from the coroutine using `co_return`
+
+When the coroutine reaches a `co_return` statement, it is translated into either a call to `promise.return_void()` or `promise.return_value(<expr>)` followed by a `goto FinalSuspend;`.
+
+当协程遇到 `co_return` 语句时，它将被转换成  `promise.return_void()` 或 `promise.reutrn_value(<expr>)` 调用，然后后面紧跟一个 `goto FinalSuspend;` 。
+
+The rules for the translation are as follows:
+
+- `co_return;`
+  -> `promise.return_void();`
+- `co_return <expr>;`
+  -> `<expr>; promise.return_void();` if `<expr>` has type `void`
+  -> `promise.return_value(<expr>);` if `<expr>` does not have type `void`
+
+转换规则如下：
+
+- `co_reutrn;`
+
+  -> `promise.return_void();`
+
+- `co_return <expr> `
+
+  -> `<expr>; promise.return_void(); `if `<expr>` has type `void`
+
+  -> `promise.return_value(<expr>);` if `<expr>` does not have type `void`
+
+The subsequent `goto FinalSuspend;` causes all local variables with automatic storage duration to be destructed in reverse order of construction before then evaluating `co_await promise.final_suspend();`.
+
+随后的 `goto FinalSuspend;` 操作将引起所有具有自动存储持续时间的局部变量以相反的构造顺序被析构，然后对 `co_await promise.final_suspend();` 求值。
+
+Note that if execution runs off the end of a coroutine without a `co_return` statement then this is equivalent to having a `co_return;` at the end of the function body. In this case, if the `promise_type` does not have a `return_void()` method then the behaviour is undefined.
+
+注意，如果在没有遇到 `co_return` 语句的情况下执行完整个协程，相当于在函数体末尾执行了 `co_return;` 语句。如果在 `promise_type` 没有 `return_void` 方法的情况下，则行为是未定义的。
+
+If either the evaluation of `<expr>` or the call to `promise.return_void()` or `promise.return_value()` throws an exception then the exception still propagates to `promise.unhandled_exception()` (see below).
+
+如果在对 `<expr>` 求值或调用 `promise.return_void` 或 `promise.return_value()` 抛出了异常，该异常会传播到 `promise.unhandled_exception()` （见下文）
+
+### Handling exceptions that propagate out of the coroutine body
+
+If an exception propagates out of the coroutine body then the exception is caught and the `promise.unhandled_exception()` method is called inside the `catch` block.
+
+如果异常从协程体内传播出去，则异常会在 `catch` 块中被捕获并调用 `promise.unhandled_exception()` 方法。
+
+Implementations of this method typically call `std::current_exception()` to capture a copy of the exception to store it away to be later rethrown in a different context.
+
+此方法通常调用 `std::current_exception()` 捕获储存异常的副本，随后在不同上下文中重新抛出。
+
+Alternatively, the implementation could immediately rethrow the exception by executing a `throw;` statement. For example see [folly::Optional](https://github.com/facebook/folly/blob/4af3040b4c2192818a413bad35f7a6cc5846ed0b/folly/Optional.h#L587) However, doing so will (likely - see below) cause the the coroutine frame to be immediately destroyed and for the exception to propagate out to the caller/resumer. This could cause problems for some abstractions that assume/require the call to `coroutine_handle::resume()` to be `noexcept`, so you should generally only use this approach when you have full control over who/what calls `resume()`.
+
+或者，该实现也可以通过立即执行 `throw;` 语句重新抛出异常。如同 [folly::Optional](https://github.com/facebook/folly/blob/4af3040b4c2192818a413bad35f7a6cc5846ed0b/folly/Optional.h#L587) 例子，然后，一旦这样做（或者类似--参见下文）将会导致协程帧被立即析构并将异常扩散到调用者/恢复者。这可能会给某些假设/要求 `coroutine_handle::resume()` 的调用是 `noexcept` 的抽象造成问题，因此通常只应在完全控制谁或什么调用 `resume()` 时使用此方法。
+
+Note that the current [Coroutines TS](http://wg21.link/N4736) wording is a [little unclear](https://github.com/GorNishanov/CoroutineWording/issues/17) on the intended behaviour if the call to `unhandled_exception()` rethrows the exception (or for that matter if any of the logic outside of the try-block throws an exception).
+
+注意，如果调用 `unhandled_exception()` 重新抛出异常（或者 try-block 外的逻辑代码抛出异常），现在的 Coroutines TS 并没有给出明确预期的行为。
+
+My current interpretation of the wording is that if control exits the coroutine-body, either via exception propagating out of `co_await promise.initial_suspend()`, `promise.unhandled_exception()` or `co_await promise.final_suspend()` or by the coroutine running to completion by `co_await p.final_suspend()` completing synchronously then the coroutine frame is automatically destroyed before execution returns to the caller/resumer. However, this interpretation has its own issues.
+
+我目前对该用语的解释是，如果控制离开协程体，无论是通过 `co_await promise.initial_suspend()`， `promise.unhandled_exception()` 或 `co_await promise.final_suspend()` 扩散出来的异常，还是同步运行到协程完成的 `co_await p.final_suspend()` ，则协程帧会在执行流转回调用者/恢复者之前自动销毁。但是，这种解释有其自身的问题。
+
+A future version of the Coroutines specification will hopefully clarify the situation. However, until then I’d stay away from throwing exceptions out of `initial_suspend()`, `final_suspend()` or `unhandled_exception()`. Stay tuned!
+
+未来版本的 Coroutines TS 有希望明确这种情况。但是，在那之前，我将避免从 `initial_suspend()`，`final_suspend()` 和 `unhandled_exception()` 中抛出异常。敬请关注。
+
+### The final-suspend point
+
+Once execution exits the user-defined part of the coroutine body and the result has been captured via a call to `return_void()`, `return_value()` or `unhandled_exception()` and any local variables have been destructed, the coroutine has an opportunity to execute some additional logic before execution is returned back to the caller/resumer.
+
+一旦执行流离开协程体中用户自定义的部分，并通过 `return_void()`，`return_value()` 或 `unhandled_exception()` 调用获得结果，同时，所有的局部变量将会被销毁，协程在将执行权返回给调用者/恢复者之前有机会执行一些额外的逻辑。
+
+The coroutine executes the `co_await promise.final_suspend();` statement.
+
+协程执行 `co_await promise.final_suspend();` 语句。
+
+This allows the coroutine to execute some logic, such as publishing a result, signalling completion or resuming a continuation. It also allows the coroutine to optionally suspend immediately before execution of the coroutine runs to completion and the coroutine frame is destroyed.
+
+这允许协程执行一些逻辑，比如发布一个结果，通过信号完成或回复一个协程。也允许协程可选地在协程执行完并在销毁协程帧之前立即挂起。
+
+Note that it is undefined behaviour to `resume()` a coroutine that is suspended at the `final_suspend` point. The only thing you can do with a coroutine suspended here is `destroy()` it.
+
+注意，`resume()` 在 `final_suspend` 点挂起的协程，行为是未定义的。协程在这点挂起时，你唯一能做的就是 `destroy()` 它。
+
+The rationale for this limitation, according to Gor Nishanov, is that this provides several optimisation opportunities for the compiler due to the reduction in the number of suspend states that need to be represented by the coroutine and a potential reduction in the number of branches required.
+
+根据 Gor Nishanov 的说话，做这样限制的原理是，可以减少协程挂起时所需的状态的数量和潜在的所需的分支的数量，这为编译器提供了一些优化机会。
+
+Note that while it is allowed to have a coroutine not suspend at the `final_suspend` point, **it is recommended that you structure your coroutines so that they do suspend at `final_suspend`** where possible. This is because this forces you to call `.destroy()` on the coroutine from outside of the coroutine (typically from some RAII object destructor) and this makes it much easier for the compiler to determine when the scope of the lifetime of the coroutine-frame is nested inside the caller. This in turn makes it much more likely that the compiler can elide the memory allocation of the coroutine frame.
+
+注意，虽然允许协程可以不在 `final_suspend` 点挂起，但是还是建议你尽可能的构建在 `final_suspend()` 挂起的协程。因为这会强制你在协程外部调用协程的 `.destroy()`（通常是从某些 RAII 对象的析构函数中），这使得编译器更容易确定协程帧的生命周期嵌套在调用者的作用域的生命周期中。 这样做更有可能让编译器取消协程帧的内存分配。
+
+### How the compiler chooses the promise type
+
+So lets look now at how the compiler determines what type of promise object to use for a given coroutine.
+
+现在让我们看一看编译器是如何确定协程使用的 promise 的类型的。
+
+The type of the promise object is determined from the signature of the coroutine by using the `std::experimental::coroutine_traits` class.
+
+promise 的类型是通过协程的签名确定的，而协程签名是使用 `std::experimental::coroutine_traits` 类确定的。
+
+If you have a coroutine function with signature:
+
+如果你有一个协程函数签名：
+
+```c++
+task<float> foo(std::string x, bool flag);
+```
+
+Then the compiler will deduce the type of the coroutine’s promise by passing the return-type and parameter types as template arguments to `coroutine_traits`.
+
+编译器将会根据传给 `coroutine_traits` 模板的返回类型和参数类型来推断协程的 promise 类型。
+
+```c++
+typename coroutine_traits<task<float>, std::string, bool>::promise_type;
+```
+
+If the function is a non-static member function then the class type is passed as the second template parameter to `coroutine_traits`. Note that if your method is overloaded for rvalue-references then the second template parameter will be an rvalue reference.
+
+如果是一个非静态成员函数，则将类类型作为第二个模板参数传给 `coroutine_traits`。注意，如果你的方法重载了右值引用，那么第二个模板参数将是右值引用。
+
+For example, if you have the following methods:
+
+例如，如果你有下面的这些方法：
+
+```c++
+task<void> my_class::method1(int x) const;
+task<foo> my_class::method2()&&;
+```
+
+编译器将使用下面的 promise 类型：
+
+```c++
+// method1 promise type
+typename coroutine_traits<task<void>, const my_class&, int>::promise_type;
+// method2 promise type
+typename coroutine_traits<task<foo>, my_class&&>::promise_type;
+```
+
+The default definition of `coroutine_traits` template defines the `promise_type` by looking for a nested `promise_type` typedef defined on the return-type. ie. Something like this (but with some extra SFINAE magic so that `promise_type` is not defined if `RET::promise_type` is not defined).
+
+`coroutine_traits` 模板中默认的 `promise_type` 定义，是去查找嵌套定义在 return-type 中的 `promise_type`。类似这样（但由于带有一些额外的 SFINAE魔法，如果 `RET::promise_type` 如果未定义，则 `promise_type` 也是未定义的）。
+
+```c++
+namespace std::experimental
+{
+    template<typename RET, typename... ARGS>
+    struct coroutine_traits<RET, ARGS...>
+    {
+        using promise_type = typename RET::promise_type;
+    };
+}
+```
+
+So for coroutine return-types that you have control over, you can just define a nested `promise_type` in your class to have the compiler use that type as the type of the promise object for coroutines that return your class.
+
+因此，你可以这样控制协程的返回类型，只需在你的类中定义一个嵌套的 `promise_type`， 编译器将会使用该类型作为协程的 promise 对象的类型。
+
+For example:
+
+```c++
+template<typename T>
+struct task
+{
+  using promise_type = task_promise<T>;  
+};
+```
+
+However, for coroutine return-types that you don’t have control over you can specialise the `coroutine_traits` to define the promise type to use without needing to modify the type.
+
+然而，对于你无法控制的协程返回类型，你可以特化 `coroutine_traits` 来定义要是用的 promise 类型，而无需修改类型。
+
+For example, to define the promise-type to use for a coroutine that returns `std::optional<T>`:
+
+例如，定义 promise 类型是  `std::optional<T>` 的协程：
+
+```c++
+namespace std::experimental
+{
+    template<typename T, typename... ARGS>
+    struct coroutine_traits<std::optional<T>, ARGS...>
+    {
+        using promise_type = optional_promise<T>;
+    };
+}
+```
+
+### Identifying a specific coroutine activation frame
+
+When you call a coroutine function, a coroutine frame is created. In order to resume the associated coroutine or destroy the coroutine frame you need some way to identify or refer to that particular coroutine frame.
+
+调用协程函数时，协程帧将被创建。为了恢复关联的协程或者销毁协程帧，你需要某些方式去标识或者引用特定的协程帧。
+
+The mechanism the Coroutines TS provides for this is the `coroutine_handle` type.
+
+Coroutines TS 为此提供的机制是 `coroutine_handle` 类型。
+
+The (abbreviated) interface of this type is as follows:
+
+此类型的接口如下（简略）：
+
+```c++
+namespace std::experimental
+{
+    template<typename Promise = void>
+    struct coroutine_handle;
+    
+      // Type-erased coroutine handle. Can refer to any kind of coroutine.
+  // Doesn't allow access to the promise object.
+    template<>
+    struct coroutine_handle
+    {
+       // Constructs to the null handle;
+        constexpr coroutine_handle();
+        
+        // Convert to/from a void* for passing into C-strle interop functions.
+        constexpr void* address() const noexcept;
+        static constexpr coroutine_handle from_address(void* addr);
+        
+        // Query if the handle is non-null.
+        constexpr explicit operator bool() const noexcept;
+        
+        // Query if the coroutine is suspended at the final_suspend point.
+        //Undefined behaviour if coroutine is not currently suspend.
+        bool done() const;
+        
+        //Resume/Destroy the suspend coroutine
+        void resume();
+        void destroy();
+    };
+    
+    // Coroutine handle for coroutines with a known promise type.
+    // Template argument must exactly match coroutine's promise type.
+    template<typename Promise>
+    struct coroutine_thandle : coroutine_handle<>
+    {
+        using coroutine_handle<>::coroutine_handle;
+        static constexpr coroutine_handle from_address(void* addr);
+        
+        // Access to the coroutine's promise object.
+        Promise& promise() const;
+        
+        // You can reconstruct the coroutine handle from the promise object.
+        static coroutine_handle from_promise(Promise& promise);
+    };
+}
+```
+
+You can obtain a `coroutine_handle` for a coroutine in two ways:
+
+1. It is passed to the `await_suspend()` method during a `co_await` expression.
+2. If you have a reference to the coroutine’s promise object, you can reconstruct its `coroutine_handle` using `coroutine_handle<Promise>::from_promise()`.
+
+你可以通过两种方式获取协程的 `coroutine_handle`：
+
+1. 在 `co_await` 表达式期间，将它传递给 `await_suspend()` 方法
+2. 如果你有一个协程 promise 对象的引用，你可以通过 使用`coroutine_handle<Promise>::from_promise()` 重构 `coroutine_handle`。
+
+The `coroutine_handle` of the awaiting coroutine will be passed into the `await_suspend()` method of the awaiter after the coroutine has suspended at the `<suspend-point>` of a `co_await` expression. You can think of this `coroutine_handle` as representing the continuation of the coroutine in a [continuation-passing style](https://en.wikipedia.org/wiki/Continuation-passing_style) call.
+
+当协程在 `co_await` 表达式的 `<suspend-point>` 被挂起后，等待协程的 `coroutine_handle` 会被传递给 awaiter 的 `await_suspend()` 方法。你可以将 `coroutine_handle` 视为 [continuation-passing style](https://en.wikipedia.org/wiki/Continuation-passing_style) 调用中延续了协程。
+
+Note that the `coroutine_handle` is **NOT** and RAII object. You must manually call `.destroy()` to destroy the coroutine frame and free its resources. Think of it as the equivalent of a `void*` used to manage memory. This is for performance reasons: making it an RAII object would add additional overhead to coroutine, such as the need for reference counting.
+
+注意，`coroutine_handle` 并不是 RAII 对象。你必须手动调用 `.destroy()` 去销毁协程帧并释放资源。你可以认为它干了和用 `void*` 管理内存一样的事。这是出于性能方面的考虑：把它变成 RAII 对象会增加协程的额外开销，例如需要引用计数。
+
+You should generally try to use higher-level types that provide the RAII semantics for coroutines, such as those provided by [cppcoro](https://github.com/lewissbaker/cppcoro) (shameless plug), or write your own higher-level types that encapsulate the lifetime of the coroutine frame for your coroutine type.
+
+通常，你应该尝试为协程提供拥有 RAII 语义的高级类型，例如 [cppcoro](https://github.com/lewissbaker/cppcoro) （）提供的那些类型，或者为你的协程类型编写高级类型来封装协程帧的生命周期。
+
+### Customising the behaviour of `co_await`
+
+The promise type can optionally customise the behaviour of every `co_await` expression that appears in the body of the coroutine.
+
+promise 类型能定义出现在协程体内的每一个 `co_await` 表达式的行为。
+
+By simply defining a method named `await_transform()` on the promise type, the compiler will then transform every `co_await <expr>` appearing in the body of the coroutine into `co_await promise.await_transform(<expr>)`.
+
+通过简单的在 promise 类上定义一个 `await_transform()` 方法，编译器就会将协程体内的每一个 `co_await <expr>` 转换成 `co_await promise.await_transform(<expr>)` 。 
+
+This has a number of important and powerful uses:
+
+它具有很多强大且重要的用途：
+
+**It lets you enable awaiting types that would not normally be awaitable.**
+
+**它会使你能等待通常不能被等待的类型**。
+
+For example, a promise type for coroutines with a `std::optional<T>` return-type might provide an `await_transform()` overload that takes a `std::optional<U>` and that returns an awaitable type that either returns a value of type `U` or suspends the coroutine if the awaited value contains `nullopt`.
+
+例如，协程的 promise 类有一个 `std::optional<T>` 返回类型，该类型提供一接收 `std::optional<U>` 参数然后返回一个 awaitable 类型的 `await_transform()` 的重载，该 awaitable 对象要么返回类型 U 的值，要么当 等待的值包含 `nullopt` 时挂起协程。
+
+```c++
+template<typename T>
+class optional_promise
+{
+    ...
+    template<typename U>
+    auto await_transform(std::optional<U>& value)
+    {
+        class awaiter
+        {
+            std::optional<U>& value;
+        public:
+            explicit awaiter(std::optional<U>& x) noexcept :vlaue(x) {}
+            bool await_ready() noexcept {return value.has_value();}
+            void await_suspend(std::experimental::coroutine_handle<>) noexcept {}
+            U& await_resume() noexcept { return * value}
+        };
+        return awaiter{value};
+    }
+};
+```
+
+**It lets you disallow awaiting on certain types by declaring `await_transform` overloads as deleted.**
+
+**通过声明 `await_transform` 重载为已删除，使你不允许等待某种类型**
+
+For example, a promise type for `std::generator<T>` return-type might declare a deleted `await_transform()` template member function that accepts any type. This basically disables use of `co_await` within the coroutine.
+
+例如，`std::generator<T>` 的 promise 类型的返回类型可能声明接收任意类型`await_transform` 模板成员函数被删除。这基本上禁用了 `co_await` 在协程内的使用。
+
+```c++
+template<typename T>
+class generator_promise
+{
+  ...
+
+  // Disable any use of co_await within this type of coroutine.
+  template<typename U>
+  std::experimental::suspend_never await_transform(U&&) = delete;
+
+};
+```
+
+**It lets you adapt and change the behaviour of normally awaitable values**
+
+**它使你能够适配和更改正常等待对象的行为**
+
+For example, you could define a type of coroutine that ensured that the coroutine always resumed from every `co_await` expression on an associated executor by wrapping the awaitable in a `resume_on()` operator (see `cppcoro::resume_on()`).
+
+例如，你可以定义一种协程类型，该协程类型通过将 awaitable 包装在 `resume_on()` 操作符中，确保协程始终从每个 `co_await` 表达式的关联执行者上恢复（参见 `cppcoro::resume_on()`）。
+
+```c++
+template<typename T, typename Executor>
+class executor_task_promise
+{
+  Executor executor;
+
+public:
+
+  template<typename Awaitable>
+  auto await_transform(Awaitable&& awaitable)
+  {
+    using cppcoro::resume_on;
+    return resume_on(this->executor, std::forward<Awaitable>(awaitable));
+  }
+};
+```
+
+As a final word on `await_transform()`, it’s important to note that if the promise type defines *any* `await_transform()` members then this triggers the compiler to transform *all* `co_await` expressions to call `promise.await_transform()`. This means that if you want to customise the behaviour of `co_await` for just some types that you also need to provide a fallback overload of `await_transform()` that just forwards through the argument.
+
+作为关于 `await_transform()` 的最后一句话，需要非常注意的是，如果promise 类型定义了任何 `await_transform` 成员，那么这将触发编译器将所有 `co_await` 表达式转化为 `promise.await_transform()` 调用。这意味着，如果你只想为某些类型自定义 `co_await` 的行为，你还需要提供仅通过参数转发的 `await_transform()` 重载。
+
+### Customising the behaviour of `co_yield`
+
+The final thing you can customise through the promise type is the behaviour of the `co_yield` keyword.
+
+你可以通过 promise 类型自定义行为的最后一件事是 `co_yield` 关键字。
+
+If the `co_yield` keyword appears in a coroutine then the compiler translates the expression `co_yield <expr>` into the expression `co_await promise.yield_value(<expr>)`. The promise type can therefore customise the behaviour of the `co_yield` keyword by defining one or more `yield_value()` methods on the promise object.
+
+如果 `co_yield` 关键字出现在协程内，编译器会将 `co_yield <expr>` 表达式 转换为 `co_await promise.yield_value(<expr>)` 表达式。因此，promise 类型可以通过在 promise 对象上定义一个或多个 `yield_value()` 方法来定义 `co_yield` 关键字的行为。
+
+Note that, unlike `await_transform`, there is no default behaviour of `co_yield` if the promise type does not define the `yield_value()` method. So while a promise type needs to explicitly opt-out of allowing `co_await` by declaring a deleted `await_transform()`, a promise type needs to opt-in to supporting `co_yield`.
+
+注意，与 `await_transform` 不同，如果 promise 类型没有定义 `yield_value()` 方法，则 `co_yield` 没有默认行为。因此，虽然 promise 类型需要通过声明被删除的 `await_transform` 来显示地选择不允许 `co_await` ，但是 promise 类型需要选择支持 `co_yield`.
+
+The typical example of a promise type with a `yield_value()` method is that of a `generator<T>` type:
+
+带有 `yield_value()` 方法的 promise 类型典型用法是 `generator<T>`:
+
+```c++
+template<typename T>
+class generator_promise
+{
+    T* valuePtr;
+public:
+    ...
+        
+        std::Experimental::suspend_always yield_value(T& value) noexcept
+    {
+        // Stash the address of the yield value and then return an awaitable
+        // that will cause the coroutine to suspend at the co_yield express.
+        // Execution will then return from the call to coroutine_handle<>::resume()
+        // inside either generator<T>::begin() or generator<T>::iterator::operator++().
+        valuePtr = std::addressof(value);
+        return {};
+    }
+};
+```
+
+# Summary
+
+In this post I’ve covered the individual transformations that the compiler applies to a function when compiling it as a coroutine.
+
+在这篇文章中，我介绍了编译器将函数编译为协程时，编译器应用于该函数的各个转换。
+
+Hopefully this post will help you to understand how you can customise the behaviour of different types of coroutines through defining different your own promise type. There are a lot of moving parts in the coroutine mechanics and so there are lots of different ways that you can customise their behaviour.
+
+希望这篇文章能帮助你理解如何通过定义不同的 promise 类型来定制不同类型协程的行为。协程机制中有很多活动部件，因此有很多不同的方法可以定制它们的行为。
+
+However, there is still one more important transformation that the compiler performs which I have not yet covered - the transformation of the coroutine body into a state-machine. However, this post is already too long so I will defer explaining this to the next post. Stay tuned!
+
+但是，我还没有介绍另外一个编译器执行的非常重要的转换--将协程体转化为状态机。但是，这篇文章已经太长了，所以我将推迟到下一篇文章来解释。敬请期待。 
+
+# C++ Coroutines: Understanding Symmetric Transfer
+
+The Coroutines TS provided a wonderful way to write asynchronous code as if you were writing synchronous code. You just need to sprinkle `co_await` at appropriate points and the compiler takes care of suspending the coroutine, preserving state across suspend-points and resuming execution of the coroutine later when the operation completes.
+
+Coroutines TS 提供了让你像写同步代码一样写异步代码的方法。你只需要在适当的位置写上 `co_await` ，编译器将负责挂起协程，保存挂起点的状态，并在操作完成后恢复协程的执行。
+
+However, the Coroutines TS, as it was originally specified, had a nasty limitation that could easily lead to stack-overflow if you weren’t careful. And if you wanted to avoid this stack-overflow then you had to introduce extra synchronisation overhead to safely guard against this in your `task<T>` type.
+
+但是，在最初的 Coroutines TS 中有一个令人讨厌的限制，你的不小心会很容易导致栈溢出。而且，如果你想避免这样的栈溢出，则必须在你的 `taks<T>` 类型中引入额外的同步开销来保证安全。
+
+Thankfully, a tweak was made to the design of coroutines in 2018 to add a capability called “symmetric transfer” which allows you to suspend one coroutine and resume another coroutine without consuming any additional stack-space. The addition of this capability lifted a key limitation of the Coroutines TS and allows for much simpler and more efficient implementation of async coroutine types without sacrificing any of the safety aspects needed to guard against stack-overflow.
+
+值得庆幸的是，2018 年对协程的设计进行了调整，增加了一个称为 “对称传输” 的功能，它允许你在不消耗任何额外栈空间的情况下暂停一个协程并恢复另外一个协程。此功能的添加解除了 Coroutines TS 的一个关键限制，允许更简单、有效地实现异步协程类型，而不牺牲任何防止栈溢出所需的安全措施。
+
+In this post I will attempt to explain the stack-overflow problem and how the addition of this key “symmetric transfer” capability lets us solve this problem.
+
+在这篇文章中，我将试图解释栈溢出问题，以及添加这种关键的 “对称传输” 功能是如何使我们解决这个问题的。
+
+## First some background on how a task coroutine works
+
+Consider the following coroutines:
+
+考虑一下协程：
+
+```c++
+task foo() {
+    co_return;
+}
+
+task bar() {
+    co_await foo();
+}
+```
+
+Assume we have a simple `task` type that lazily executes the body when another coroutine awaits it. This particular `task` type does not support returning a value.
+
+假设我们有一个简单的 `task` 类型，当另外一个协程等待它时，它会懒执行自己的主体。该特定 `task` 类型不支持返回值。
+
+Let’s unpack what’s happening here when `bar()` evaluates `co_await foo()`.
+
+- The `bar()` coroutine calls the `foo()` function. Note that from the caller’s perspective a coroutine is just an ordinary function.
+- The invocation of `foo()` performs a few steps:
+  - Allocates storage for a coroutine frame (typically on the heap)
+  - Copies parameters into the coroutine frame (in this case there are no parameters so this is a no-op).
+  - Constructs the promise object in the coroutine frame
+  - Calls `promise.get_return_object()` to get the return-value for `foo()`. This produces the `task` object that will be returned, initialising it with a `std::coroutine_handle` that refers to the coroutine frame that was just created.
+  - Suspends execution of the coroutine at the initial-suspend point (ie. the open curly brace)
+  - Returns the `task` object back to `bar()`.
+- Next the `bar()` coroutine evaluates the `co_await` expression on the `task` returned from `foo()` .
+  - The `bar()` coroutine suspends and then calls the `await_suspend()` method on the returned task, passing it the `std::coroutine_handle` that refers to `bar()`’s coroutine frame.
+  - The `await_suspend()` method then stores `bar()`’s `std::coroutine_handle` in `foo()`’s promise object and then resumes the `foo()` coroutine by calling `.resume()` on `foo()`’s `std::coroutine_handle`.
+- The `foo()` coroutine executes and runs to completion synchronously.
+- The `foo()` coroutine suspends at the final-suspend point (ie. the closing curly brace) and then resumes the coroutine identified by the `std::coroutine_handle` that was stored in its promise object before it was started. ie. `bar()`’s coroutine.
+- The `bar()` coroutine resumes and continues executing and eventually reaches the end of the statement containing the `co_await` expression at which point it calls the destructor of the temporary `task` object returned from `foo()`.
+- The `task` destructor then calls the `.destroy()` method on `foo()`’s coroutine handle which then destroys the coroutine frame along with the promise object and copies of any arguments.
+
+让我们拆解一下 `bar()` 中对 `co_await foo()` 求值时，发生了那些事情：
+
+- 协程 `bar()` 调用了函数 `foo()`。注意，在调用者的角度来看，协程就是一个普通的函数。
+- 调用 `foo()` 执行了这么几个步骤：
+  - 为协程帧分配存储（通常在堆上）
+  - 复制参数到协程帧（本例中没有参数，所以不需要该操作）
+  - 在协程帧中构建 promise 对象
+  - 调用 `promise.get_return_object()` 获取 `foo()` 的return-value。这会产生将要返回的 `task` 对象，并使用一个 `std::coroutine_handle` 对其进行初始化，该 `std::coroutine_handle` 对象引用刚被创建的协程帧。
+  - 将协程在 initial-suspend 点挂起（即开始的花括号）
+  - 返回 `task` 对象给 `bar()`。
+- 接着，协程 `bar()` 的 `co_await` 表达式对 `foo()` 返回的 `task` 求值。
+  - 协程 `bar()` 挂起，然后调用返回的 `task` 上的 `await_suspend()` 方法，并传入关联 `bar()` 协程帧的 `std::coroutine_handle` 。
+  - `await_suspend()` 方法在 `foo()` 的 promise 对象中存储 `bar()` 的 `std::coroutine_handle` ，然后通过调用 `foo()` 的 `std::coroutine_handle` 上的 `.resume()` 方法恢复协程 `foo()`。
+- 协程 `foo()` 同步的执行到结束。
+- 协程 `foo()` 在 final-suspend 点（即结束的花括号）挂起，然后恢复之前存储在它的 promise 对象中的 `std::coroutine_handle` 所标识的协程，也就是协程 `bar()` 。
+- 协程 `bar()` 恢复并继续执行，并最终到达包含 `co_await` 表达式的语句的末尾，然后它调用从 `foo()` 返回的临时 `task` 对象的析构函数。
+- `task` 的析构函数调用 `foo()` 的协程句柄的 `.destroy()` 方法，然后销毁协程帧以及 promise 对象和所有参数的副本。
+
+Ok, so that seems like a lot of steps for a simple call.
+
+好吧，这对一个简单的调用来说似乎有太多的步骤了。
+
+To help understand this in a bit more depth, let’s look at how a naive implementation of this `task` class would look when implemented using the the Coroutines TS design (which didn’t support symmetric transfer).
+
+为了有助于更深入的了解这一点，让我们看看使用 Coroutines TS 设计（不支持对称传输）实现时，这个 `task` 类的有缺陷的实现是什么样子的。
+
+## Outline of a `task` implementation
+
+The outline of the class looks something like this:
+
+该类大概类似这样：
+
+```c++
+class task{
+public:
+    class promise_type {/*see below*/};
+    
+    task(task&& t) noexcept
+        :coro_(std::exchange(t.coro, {}))
+    {}
+    
+    ~task() {
+        if(coro_)
+            coro_.destroy();
+    }
+    
+    class awaiter { /*see below */};
+    awaiter operator co_await()&& noexcept;
+private:
+    explicit task(std::coroutine_handle<promise_type> h) noexcept
+        : coro_(h)
+        {}
+    std::coroutine_handle<promise_type> coro_;
+};
+```
+
+A `task` has exclusive ownership of the `std::coroutine_handle` that corresponds to the coroutine frame created during the invocation of the coroutine. The `task` object is an RAII object that ensures that `.destroy()` is called on the `std::coroutine_handle` when the `task` object goes out of scope.
+
+`task` 拥有 `std::coroutine_handle` 的独占权，该 `std::coroutine_handle` 对应调用协程时创建的协程帧。`task` 对象是一个 RAII 对象，他确保当 `task` 对象超出作用域时，会调用 `std::coroutine_handle` 上的 `.destroy()` 方法。
+
+So now let’s expand on the `promise_type`.
+
+现在，让我们扩展 `promise_type`。
+
+## Implementing `task::promise_type`
+
+From the [previous post](https://lewissbaker.github.io/2018/09/05/understanding-the-promise-type) we know that the `promise_type` member defines the type of the **Promise** object that is created within the coroutine frame and that controls the behaviour of the coroutine.
+
+从[上一篇文章](https://lewissbaker.github.io/2018/09/05/understanding-the-promise-type)中我们知道，`promise_type` 成员定义了在协程帧中创建的 **Promise** 对象的类型，该 `Promise` 对象控制协程的行为。
+
+First, we need to implement the `get_return_object()` to construct the `task` object to return when the coroutine is invoked. This method just needs to initialise the task with the `std::coroutine_handle` of the newly create coroutine frame.
+
+首先，我们需要实现 `get_return_object()` 来构造调用协程时要返回的 `task` 对象。这个方法只需要用新创建的协程帧的 `std::coroutine_handle` 初始化 `task` 对象。
+
+We can use the `std::coroutine_handle::from_promise()` method to manufacture one of these handles from the promise object.
+
+我们可以使用 `std::coroutine_handle::from_promise()` 方法从 promise 对象中制造这些句柄之一。
+
+```c++
+class task::promise_type {
+public:
+    task get_return_object() noexcept {
+        return task{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+};
+```
+
+Next, we want the coroutine to initially suspend at the open curly brace so that we can later resume the coroutine from this point when the returned `task` is awaited.
+
+接着，我们希望协程最初在开始的大括号处挂起，以便稍后返回的 `task` 变成等待时，我们可以从这里恢复协程。
+
+There are several benefits of starting the coroutine lazily:
+
+1. It means that we can attach the continuation’s `std::coroutine_handle` before starting execution of the coroutine. This means we don’t need to use thread-synchronisation to arbitrate the race between attaching the continuation later and the coroutine running to completion.
+2. It means that the `task` destructor can unconditionally destroy the coroutine frame - we don’t need to worry about whether the coroutine is potentially executing on another thread since the coroutine will not start executing until we await it, and while it is executing the calling coroutine is suspended and so won’t attempt to call the task destructor until the coroutine finishes executing. This gives the compiler a much better chance at inlining the allocation of the coroutine frame into the frame of the caller. See [P0981R0](https://wg21.link/P0981R0) to read more about the Heap Allocation eLision Optimisation (HALO).
+3. It also improves the exception-safety of your coroutine code. If you don’t immediately `co_await` the returned `task` and do something else that can throw an exception that causes the stack to unwind and the `task` destructor to run then we can safely destroy the coroutine since we know it hasn’t started yet. We aren’t left with the difficult choice between detaching, potentially leaving dangling references, blocking in the destructor, terminating or undefined-behaviour. This is something that I cover in a bit more detail in my [CppCon 2019 talk on Structured Concurrency](https://www.youtube.com/watch?v=1Wy5sq3s2rg).
+
+延迟启动协程有这么几个好处：
+
+1. 这意味着我们可以在执行协程之前附加持续的 `std::coroutine_handle`。这意味着我们不需要使用线程同步来仲裁稍后附加持续和运行到完成的协程间的竞争。
+2. 这意味着 `task` 的析构函数可以无条件的销毁协程帧--我们不必担心协程是否有可能在另外一个线程上运行，因为协程在我们等待它之前不会开始执行，当它执行时，调用的协程将被挂起，因此在协程完成执行前不会尝试调用 `task` 的歇够函数。这使编译器有更好的机会将协程帧内联到调用者的帧中。有关堆分配省略优化（HALO）更多的信息，请参阅 [P0981R0](https://wg21.link/P0981R0)。
+3. 它还能提供协程代码的异常安全性。如果你不立即 `co_await` 返回的 `task` 对象，并且执行了其他可能引发异常的操作，从而导致栈展开并执行了 `task` 的析构函数，那么我们可以安全的销毁协程，因为我们知道它还没有启动。在分离、潜在第留下挂起的引用、在析构函数中阻塞、终止或未定义的行为之间，我们没有面临艰难的选择。这是我在我的 [CppCon 2019 talk on Structured Concurrency](https://www.youtube.com/watch?v=1Wy5sq3s2rg) 中更详细讨论的内容。
+
+To have the coroutine initially suspend at the open curly brace we define an `initial_suspend()` method that returns the builtin `suspend_always` type.
+
+为了使协程在开始大括号处初始挂起，我们定义了 `initial_suspend()` 方法，该方法返回内置的 `suspend_always` 类型。
+
+```c++
+std::suspend_always initial_suspend() noexcept{
+    return {};
+}
+```
+
+Next, we need to define the `return_void()` method, called when you execute `co_return;` or when execution runs off the end of the coroutine. This method doesn’t actually need to do anything, it just needs to exist so that the compiler knows that `co_return;` is valid within this coroutine type.
+
+接下来，我们需要定义 `return_void()` 方法，这个方法在执行 `co_return;` 时调用，或者运行到协程的末尾时调用。这个方法实际上不做任何事情，它只是需要存在，以便编译器知道 `co_return;` 在这个协程类型中是有效的。
+
+```c++
+void reutrn_void() noexcept {}
+```
+
+We also need to add an `unhandled_exception()` method that is called if an exception escapes the body of the coroutine. For our purposes we can just treat the task coroutine bodies as `noexcept` and call `std::terminate()` if this happens.
+
+我们还需要添加一个 `unhandled_exception()` 方法，该方法在异常从协程体扩散出来时调用。出于我们的目的，我们可以仅将 task 协程体视为 `noexcept`  ，并在发生异常时调用 `std::terminate()` 。
+
+```c++
+void unhandled_exception() noexcept {
+    std::terminate();
+}
+```
+
+Finally, when the coroutine execution reaches the closing curly brace, we want the coroutine to suspend at the final-suspend point and then resume its continuation. ie. the coroutine that is awaiting the completion of this coroutine.
+
+最后，当协程执行到结束的大括号时，我们希望协程在 final-suspend 点挂起，然后恢复它的执行，即等待这个协程完成的协程。
+
+To support this, we need a data-member in the promise to hold the `std::coroutine_handle` of the continuation. We also need to define the `final_suspend()` method that returns an awaitable object that will resume the continuation after the current coroutine has suspended at the final-suspend point.
+
+为了做到这一点，我们需要将协程的 `std::coroutine_handle`  保存在 `promise` 中的数据成员中。我们还需要定义 `final_suspend()` 方法，该方法返回一个可等待对象，该对象将在当前协程在 final-suspend 点挂起后继续执行后续的操作。
+
+It’s important to delay resuming the continuation until after the current coroutine has suspended because the continuation may go on to immediately call the `task` destructor which will call `.destroy()` on the coroutine frame. The `.destroy()` method is only valid to call on a suspended coroutine and so it would be undefined-behaviour to resume the continuation before the current coroutine has suspended.
+
+将恢复后续操作延迟到当前协程挂起后是很重要的，因为后续操作有可能会立即调用 `task`  的析构函数，这会导致在协程帧上调用 `.destroy()` 方法。`.destroy()` 方法只有在挂起的协程上调用才是有效的，因此在当前挂起协程之前恢复后续执行将产生未定义行为。
+
+The compiler inserts code to evaluate the statement `co_await promise.final_suspend();` at the closing curly brace.
+
+编译器在结束大括号处插入代码计算 `co_await promise.final_suepend();` 语句的值。
+
+It’s important to note that the coroutine is not yet in a suspended state when the `final_suspend()` method is invoked. We need to wait until the `await_suspend()` method on the returned awaitable is called before the coroutine is suspended.
+
+需要注意的是，当 `final_suspend()` 方法被调用时，协程还没有出于挂起状态。我们需要等到调用返回的 awaitable 上的 `await_suspend()` 方法后，才能挂起协程。
+
+```c++
+struct final_awaiter {
+    bool await_ready() noexcept {
+        return false;
+    }
+    
+    void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
+        // The coroutine is now suspended at the final-suspedn point.
+        // Lookup its continuation in the promise and resume it.
+        h.promise().continuation.resume();
+    }
+    
+    void await_resume() noexcept {}
+    
+    final_awaiter final_suspend() noexcept {
+        return {};
+    }
+    
+    std::coroutine_handle<> continuation;
+};
+```
+
+Ok, so that’s the complete `promise_type`. The final piece we need to implement is the `task::operator co_await()`.
+
+好了，这就是完整的 promise_type。我们需要实现的最后一部分是 `task::operator co_await()`。
+
+## Implementing `task::operator co_await()`
+
+You may remember from the [Understanding operator co_await() post](https://lewissbaker.github.io/2017/11/17/understanding-operator-co-await) that when evaluating a `co_await` expression, the compiler will generate a call to `operator co_await()`, if one is defined, and then the object returned must have the `await_ready()`, `await_suspend()` and `await_resume()` methods defined.
+
+你可能记得在 [理解 operator co_await() ](https://lewissbaker.github.io/2017/11/17/understanding-operator-co-await) 的文章中，当计算一个 `co_await()` 表达式时，编译器将生成一个对 `operator co_await()` 调用，如果定义了这个调用，那么返回的对象必须具有 `await_ready()`， `await_suspend()` 和 `await_resume()` 方法。
+
+When a coroutine awaits a `task` we want the awaiting coroutine to always suspend and then, once it has suspended, store the awaiting coroutine’s handle in the promise of the coroutine we are about to resume and then call `.resume()` on the `task`’s `std::coroutine_handle` to start executing the task.
+
+当一个协程等待一个 `task` 时，我们希望等待协程总是挂起，然后，一旦它挂起，将等待协程的句柄存储在我们将要恢复的协程的 `promise`  中，然后在 `task` 的 `std::coroutine_handle` 上调用 `.resume()` 方法，以开始执行该任务。
+
+Thus the relatively straight forward code:
+
+因此，相对简单的代码是：
+
+```c++
+class task::awaiter {
+public:
+    bool await_ready() noexcept {
+        return false;
+    }
+    
+    void await_suspend(std::coroutine_handle<> continuation) noexcept {
+        // Store the continuation in the task's so that the final_suspend()
+        // knows to resume this coroutine when the task complete
+        coro_.promise().continuation = continuation;
+        coro_.resume();
+    }
+    
+    void await_resume() noexcept {}
+private:
+    explicit awaiter(std::coroutine_handle<task::promise_type> h) noexcept
+        :coro_(h)
+        {}
+    std::coroutine_handle<task::promise_type> coro_;
+};
+task::awaiter task::operator co_await() && noexcept {
+    return awaiter{coro_};
+}
+```
+
+And thus completes the code necessary for a functional `task` type.
+
+从而完成功能性 `task` 类型所需的代码。
+
+You can see the complete set of code in Compiler Explorer here: https://godbolt.org/z/-Kw6Nf
+
+你可以在此查看编译器资源管理器中的完整代码：https://godbolt.org/z/-Kw6Nf
+
+## The stack-overflow problem
+
+The limitation of this implementation arises, however, when you start writing loops within your coroutines and you `co_await` tasks that can potentially complete synchronously within the body of that loop.
+
+然而，这种实现的局限在于，当你开始在协程中编写循环代码时，你的 `co_await` 任务可能会在循环体内同步的完成。
+
+For example:
+
+```c++
+task completes_synchronously() {
+    co_return;
+}
+task loop synchronously(int count) {
+    for(int i = 0; i < count; ++i)
+        co_await completes_synchronously();
+}
+```
+
+With the naive `task` implementation described above, the `loop_synchronously()` function will (probably) work fine when `count` is 10, 1000, or even 100’000. But there will be a value that you can pass that will eventually cause this coroutine to start crashing.
+
+对于上面描述的简单 `task` 的实现，当 `count` 为 10、1000 甚至是 100’000  时，`loop_synchronously()` 函数（可能）正常工作。但是你传递的值有可能导致这个协程开始崩溃。
+
+For example, see: https://godbolt.org/z/gy5Q8q which crashes when `count` is 1’000’000.
+
+例如，在 https://godbolt.org/z/gy5Q8q 这里你可以看到，当 `count` 是 1’000’000 时发生了崩溃。
+
+The reason that this is crashing is because of stack-overflow.
+
+这是因为栈溢出导致的崩溃。
+
+To understand why this code is causing a stack-overflow we need to take a look at what is happening when this code is executing. In particular, what is happening to the stack-frames.
+
+为了理解为什么这段代码会导致栈溢出，我们需要了解在执行这段代码时发生了什么。特别是，栈帧发生了什么。
+
+When the `loop_synchronously()` coroutine first starts executing it will be because some other coroutine `co_await`ed the `task` returned. This will in turn suspend the awaiting coroutine and call `task::awaiter::await_suspend()` which will call `resume()` on the task’s `std::coroutine_handle`.
+
+当 `loop_synchronously()` 协程第一次执行时，它将因为 `co_await` 其他协程而等待返回的 `task` 。这将反过来挂起等待的协程并调用 `task::awaiter::awaiter_suspend()` ，后者将调用 task 的 `std::coroutine_handle` 上的 `resume()` 方法。
+
+Thus the stack will look something like this when `loop_synchronously()` starts:
+
+因此，当 `loop_synchronously()` 启动时，栈看起来像下面一样：
+
+```
+           Stack                                                   Heap
++------------------------------+  <-- top of stack   +--------------------------+
+| loop_synchronously$resume    | active coroutine -> | loop_synchronously frame |
++------------------------------+                     | +----------------------+ |
+| coroutine_handle::resume     |                     | | task::promise        | |
++------------------------------+                     | | - continuation --.   | |
+| task::awaiter::await_suspend |                     | +------------------|---+ |
++------------------------------+                     | ...                |     |
+| awaiting_coroutine$resume    |                     +--------------------|-----+
++------------------------------+                                          V
+|  ....                        |                     +--------------------------+
++------------------------------+                     | awaiting_coroutine frame |
+                                                     |                          |
+                                                     +--------------------------+
+```
+
+> Note: When a coroutine function is compiled the compiler typically splits it into two parts:
+>
+> 1. *the “ramp function” which deals with the construction of the coroutine frame, parameter copying, promise construction and producing the return-value, and*
+> 2. the “coroutine body” which contains the user-authored logic from the body of the coroutine.
+>
+> I use the `$resume` suffix to refer to the “coroutine body” part of the coroutine.
+>
+> A later blog post will go into more detail about this split.
+
+> 注意：当一个协程函数被编译时，编译器通常会把它分成两部分：
+>
+> 1. “ramp function” 处理协程帧的构造、参数复制、promise 构造和产生 return-value
+> 2. “coroutine body” 包含协程体中用户编写的逻辑
+>
+> 我是用 `$resume` 后缀来代指协程的 `coroutine body` 部分。
+>
+> 稍后的博客文章会更详细的介绍这种分裂。
+
+Then when `loop_synchronously()` awaits the `task` returned from `completes_synchronously()` the current coroutine is suspended and calls `task::awaiter::await_suspend()`. The `await_suspend()` method then calls `.resume()` on the coroutine handle corresponding to the `completes_synchronously()` coroutine.
+
+然后，当 `loop_synchronously()` 等待 `completes_synchronously()` 返回的 `task`  ，当前协程被挂起并调用 `task::awaiter::await_suspend()`。然后，`await_suspend()` 方法在于 `completes_synchronously()` 协程相对应的协程句柄上调用 `.resume()` 。
+
+This resumes the `completes_synchronously()` coroutine which then runs to completion synchronously and suspends at the final-suspend point. It then calls `task::promise::final_awaiter::await_suspend()` which calls `.resume()` on the coroutine handle corresponding to `loop_synchronously()`.
+
+这将恢复 `completes_synchronously()` 协程，然后同步运行到完成并在 final_suspend 点挂起。然后，它调用 `task::promise::final_awaiter::await_suspend()` ，在对应于 `loop_synchronously()` 的协程句柄上调用 `.resume()` 。
+
+The net result of all of this is that if we look at the state of the program just after the `loop_synchronously()` coroutine is resumed and just before the temporary `task` returned by `completes_synchronously()` is destroyed at the semicolon then the stack/heap should look something like this:
+
+所有这一切的最终结果是，如果我们在 `loop_synchronously()` 协程恢复后，而在 `completes_synchronously()` 返回的临时 `task` 销毁之前，查看程序的状态，则堆栈应该是这样的：
+
+```
+           Stack                                                   Heap
++-------------------------------+ <-- top of stack
+| loop_synchronously$resume     | active coroutine -.
++-------------------------------+                   |
+| coroutine_handle::resume      |            .------'
++-------------------------------+            |
+| final_awaiter::await_suspend  |            |
++-------------------------------+            |  +--------------------------+ <-.
+| completes_synchronously$resume|            |  | completes_synchronously  |   |
++-------------------------------+            |  | frame                    |   |
+| coroutine_handle::resume      |            |  +--------------------------+   |
++-------------------------------+            '---.                             |
+| task::awaiter::await_suspend  |                V                             |
++-------------------------------+ <-- prev top  +--------------------------+   |
+| loop_synchronously$resume     |     of stack  | loop_synchronously frame |   |
++-------------------------------+               | +----------------------+ |   |
+| coroutine_handle::resume      |               | | task::promise        | |   |
++-------------------------------+               | | - continuation --.   | |   |
+| task::awaiter::await_suspend  |               | +------------------|---+ |   |
++-------------------------------+               | - task temporary --|---------'
+| awaiting_coroutine$resume     |               +--------------------|-----+
++-------------------------------+                                    V
+|  ....                         |               +--------------------------+
++-------------------------------+               | awaiting_coroutine frame |
+                                                |                          |
+                                                +--------------------------+
+```
+
+Then the next thing this will do is call the `task` destructor which will destroy the `completes_synchronously()` frame. It will then increment the `count` variable and go around the loop again, creating a new `completes_synchronously()` frame and resuming it.
+
+然后接下来要做的事情就是调用 `task` 的析构函数，销毁 `completes_synchronously()` 帧。然后，它将增加 `count` 变量并再次执行循环，创建一个新的 `completes_synchronously()` 帧并恢复它。
+
+In effect, what is happening here is that `loop_synchronously()` and `completes_synchronously()` end up recursively calling each other. Each time this happens we end up consuming a bit more stack-space, until eventually, after enough iterations, we overflow the stack and end up in undefined-behaviour land, typically resulting in your program promptly crashing.
+
+实际上，这里发生的是 `loop_synchronously()` 和 `completes_synchronously()`  互相调用对方直至递归结束。每次发生这种情况时，我们都会占用更多的栈空间，直到最终，经过足够多的迭代，我们溢出栈并最终导致未定义的行为，通常会导致程序迅速崩溃。
+
+Writing loops in coroutines built this way makes it very easy to write functions that perform unbounded recursion without looking like they are doing any recursion.
+
+在以这种方式构建的协程中编写循环，可以非常容易地编写执行无限递归的函数，而看起来却像没有执行递归一样。
+
+So, what would the solution look like under the original Coroutines TS design?
+
+那么，在原始的 Coroutines TS 设计下的解决方案会是什么样的呢。
+
+## The Coroutines TS solution
+
+Ok, so what can we do about this to avoid this kind of unbounded recursion?
+
+那么，我们该怎么做才能避免这种无限制的递归呢。
+
+With the above implementation we are using the variant of `await_suspend()` that returns `void`. In the Coroutines TS there is also a version of `await_suspend()` that returns `bool` - if it returns `true` then the coroutine is suspended and execution returns to the caller of `resume()`, otherwise if it returns `false` then the coroutine is immediately resumed, but this time without consuming any additional stack-space.
+
+对于上面的实现，我们使用了 `await_suspend()` 的变体，该变体返回 `void` 。在 Coroutines TS 中，还有一个 `await_suspend()` 的版本，它返回 `bool` -- 如果它返回 `true` ，则协程被挂起，执行流返回到 `resume()`  的调用者，否则，如果它返回 `false` ，则立即恢复协程，但是这次不占用任何额外的栈空间。
+
+So, to avoid the unbounded mutual recursion what we want to do is make use of the `bool`-returning version of `await_suspend()` to resume the current coroutine by returning `false` from the `task::awaiter::await_suspend()` method if the task completes synchronously instead of resuming the coroutine recursively using `std::coroutine_handle::resume()`.
+
+因此，如果任务同步完成，为了避免无限的相互递归，我们要做的是利用返回 `bool` 的 `await_suspend()` 版本来恢复当前协程，方法是从 `task::awaiter::await_suspend()` 方法返回 `false` ，而不是使用 `std::coroutine_handle::resume()` 递归地恢复协程。
+
+To implement a general solution for this there are two parts.
+
+1. Inside the `task::awaiter::await_suspend()` method you can start executing the coroutine by calling `.resume()`. Then when the call to `.resume()` returns, check whether the coroutine has run to completion or not. If it has run to completion then we can return `false`, which indicates the awaiting coroutine should immediately resume, or we can return `true`, indicating that execution should return to the caller of `std::coroutine_handle::resume()`.
+2. Inside `task::promise_type::final_awaiter::await_suspend()`, which is run when the coroutine runs to completion, we need to check whether the awaiting coroutine has (or will) return `true` from `task::awaiter::await_suspend()` and if so then resume it by calling `.resume()`. Otherwise, we need to avoid resuming the coroutine and notify `task::awaiter::await_suspend()` that it needs to return `false`.
+
+要实现这个问题的通用解决方案，有两个问题：
+
+1. 在 `task::awaiter::await_suspend()` 方法内部，你可以通过调用`.resume()` 方法开始执行协程。然后，当 `.resume()` 的调用返回时，检查协程是否执行完毕。如果已经执行完毕，则可以返回 `false` ，这表示等待的协程应立即恢复，或者可以返回 `true` ，表示执行应该返回给 `std::coroutine_handle::resume()` 的调用者。
+2. 当协程运行到完成时，在运行的 `task::promise_type::final_awaiter::await_suspend()` 内部，我们需要检查等待协程是否已经（或将）从 `task::awaiter::await_suspend()` 返回 `true` ，如果是，则通过 `.resume()` 恢复它。否则，我们需要避免恢复协程，并通知 `task::awaiter::await_suspend()` 它需要返回 `false` 。
+
+There is an added complication, however, in that it’s possible for a coroutine to start executing on the current thread then suspend and later resume and run to completion on a different thread before the call to `.resume()` returns. Thus, we need to be able to resolve the potential race between part 1 and part 2 above happening concurrently.
+
+但是，这增加了以个复杂性，在对 `.resume()` 的调用返回之前，协程可能会在当前线程上开始执行，然后挂起，稍后在另外一个线程恢复并运行到完成。因此，我们需要能够解决上述第一部分和第二部分同时发生的潜在竞争。
+
+We will need to use a `std::atomic` value to decide the winner of the race here.
+
+我们将使用 `std::atomic`  值确定竞争的胜者。
+
+Now for the code. We can make the following modifications:
+
+现在，我们可以对代码做如下修改：
+
+```c++
+class task::promise_type {
+    ...
+        
+    std::coroutine_handle<> continuation;
+    std::atomic<bool> ready = false;
+};
+
+bool task::awaiter::await_suspend(
+    std::coroutine_handle<> continuation) noexcept {
+    promise_type& promise = coro_.promise();
+    promise.continuation = continuation;
+    coro_.resume();
+    
+    return !promise.ready.exchange(true, std::memory_order_acq_rel);
+}
+
+void task::promise_type::final_awaitre::await_suspend(
+std::coroutine_handle<promise_type> h) noexcept {
+    promise_type& promise = h.promise();
+    if(promise.ready.exchange(true, std::memory_order_acq_rel)) {
+        // The coroutine did not complete  synchronously, resume it here.
+        promise.continuation.resume();
+    }
+}
+```
+
+See the updated example on Compiler Explorer: https://godbolt.org/z/7fm8Za Note how it no longer crashes when executing the `count == 1'000'000` case.
+
+请参阅编译器资源管理器上的更新示例:  https://godbolt.org/z/7fm8Za 。注意，当 `count == 1'000'000`  例子时，它不在崩溃。
+
+This turns out to be the approach that the `cppcoro::task<T>` [implementation](https://github.com/lewissbaker/cppcoro/blob/master/include/cppcoro/task.hpp) took to avoid the unbounded recursion problem (and still does for some platforms) and it has worked reasonably well.
+
+这就是 `cppcoro::task<T>` [实现](https://github.com/lewissbaker/cppcoro/blob/master/include/cppcoro/task.hpp) 为了避免无限递归的问题而采用的方法（在某些平台上仍然是这样），而且效果不错。
+
+Woohoo! Problem solved, right? Ship it! Right…?
+
+哇哦! 问题解决了，对吧? 运走它! 对吧... ？
