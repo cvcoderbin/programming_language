@@ -2521,3 +2521,793 @@ This turns out to be the approach that the `cppcoro::task<T>` [implementation](h
 Woohoo! Problem solved, right? Ship it! Right…?
 
 哇哦! 问题解决了，对吧? 运走它! 对吧... ？
+
+## The problems
+
+While the above solution does solve the recursion problem it has a couple of drawbacks.
+
+虽然上述解决方案确实解决了递归问题，但它有两个缺点。
+
+Firstly, it introduces the need for `std::atomic` operations which can be quite costly. There is an atomic exchange on the caller when suspending the awaiting coroutine, and another atomic exchange on the callee when it runs to completion. If your application only ever executes on a single thread then you are paying the cost of the atomic operations for synchronising threads even though it’s never needed.
+
+首先，它引入了对 `std::atomic` 操作的需求，这可能会非常昂贵。挂起等待协程时，在调用方上进行原子交还，而在被调用方运行完成时，在被调用方上进行原子交还。如果你的程序仅在单个线程上执行，那么即使你永远不需要它，也要为同步线程付出原子操作的开销。
+
+Secondly, it introduces additional branches. One in the caller, which needs to decide whether to suspend or immediately resume the coroutine, and one in the callee, which needs to decide whether to resume the continuation or suspend.
+
+其次，它引入了其他分支。一个在调用发中，它需要决定是暂停还是立即恢复协程，另一个在被调用方中，它需要决定继续还是暂停。
+
+Note that the cost of this extra branch, and possibly even the atomic operations, would often be dwarfed by the cost of the business logic present in the coroutine. However, coroutines have been advertised as a zero cost abstraction and there have even been people using coroutines to suspend execution of a function to avoid waiting for an L1-cache-miss (see Gor’s great [CppCon talk on nanocoroutines](https://www.youtube.com/watch?v=j9tlJAqMV7U) for more details on this).
+
+注意，这个额外分支的成本，甚至可能是原子操作的开销，与协程中的业务逻辑成本相比，往往相形见绌。然后，协程已经被宣传为一种零成本的抽象，甚至有人使用协程来暂停函数的执行，以避免等待 L1-cache-miss （一级缓存未命中）（有关这么方面的详细信息，请参阅 Gor 在 CppCon 关于 [nanocoroutines](https://www.youtube.com/watch?v=j9tlJAqMV7U) 的演讲）。
+
+Thirdly, and probably most importantly, it introduces some non-determinism in the execution-context that the awaiting coroutine resumes on.
+
+第三，也可能是最重要的是，它在协程恢复的执行上下文中引入了一些非确定性。
+
+Let’s say I have the following code:
+
+假设我有以下的代码：
+
+```c++
+cppcoro::static_thread_pool tp;
+
+task foo()
+{
+    std::cout << "foo1" << std::this_thread::get_id() << "\n";
+    // Suspend coroutine and reschedule onto thread-pool thread.
+    co_await tp.schedule();
+    std::cout << "foo2" << std::this_thread::get_id() << "\n";
+}
+
+task bar()
+{
+    std::cout << "bar1" << std::this_thread::get_id() << "\n";
+    co_await foo();
+    std::cout << "bar2" << std::this_thread::get_id() << "\n";
+}
+```
+
+With the original implementation we were guaranteed that the code that runs after `co_await foo()` would run inline on the same thread that `foo()` completed on.
+
+使用最初的实现，可以保证 `co_await foo()` 之后运行的代码可以在 `foo()` 完成的统一线程上运行。
+
+For example, one possible output would have been:
+
+例如，一种可能的输出是：
+
+```
+bar1 1234
+foo1 1234
+foo2 3456
+bar2 3456
+```
+
+However, with the changes to use atomics, it’s possible the completion of `foo()` may race with the suspension of `bar()` and this can, in some cases, mean that the code after `co_await foo()` might run on the original thread that `bar()` started executing on.
+
+但是，由于原子操作的引入， `foo()` 的完成和 `bar()` 的挂起可能产生竞争。在某些情况下，这意味着 `co_await foo()` 之后的代码可能会在 `bar()` 开始执行的原始线程上运行。
+
+For example, the following output might now also be possible:
+
+例如，现在也有可能出现以下输出：
+
+```
+bar1 1234
+foo1 1234
+foo2 3456
+bar2 1234
+```
+
+For many use-cases this behaviour may not make a difference. However, for algorithms whose purpose is to transition execution context this can be problematic.
+
+对于许多用例来说，这种行为可能没有什么不同。然而，对于目的是转换执行上下文的算法来说，这可能是个问题。
+
+For example, the `via()` algorithm awaits some Awaitable and then produces it on the specified scheduler’s execution context. A simplified version of this algorithm is shown below.
+
+例如，`via()` 算法等待某个 Awaitable ，然后在指定的调度程序的执行上下文中生成它。这个算法的简化版本如下所示。
+
+```c++
+template<typename Awaitable, typename Scheduler>
+task<await_result_t<Awaitable>> via(Awaitable a, Scheduler s)
+{
+    auto result = co_await std::move(a);
+    co_await s.schedule();
+    co_return result;
+}
+
+task<T> get_value();
+void consume(const T&);
+
+task<void> consumer(static_thread_pool::scheduler s)
+{
+    T result = co_await via(get_value(), s);
+    consume(result);
+}
+```
+
+With the original version the call to `consume()` is always guaranteed to be executed on the thread-pool, `s`. However, with the revised version that uses atomics it’s possible that `consume()` might either be executed on a thread associated with the scheduler, `s`, or on whatever thread the `consumer()` coroutine started execution on.
+
+对于原始版本，`consume()` 的调用始终保证在线程池中执行。但是，对于使用原子操作的修订版本， `consume()` 可能要么在与调度程序相关的线程上执行，要么在 `consume()` 协程开始执行的任何线程上执行。
+
+So how do we solve the stack-overflow problem without the overhead of the atomic operations, extra branches and the non-deterministic resumption context?
+
+那么，如何在不引入原子操作、额外分支和不确定性恢复上下文的情况下解决堆栈溢出的问题呢？
+
+## Enter “symmetric transfer”!（对称传输）
+
+The paper [P0913R0](https://wg21.link/P0913R0) “Add symmetric coroutine control transfer” by Gor Nishanov (2018) proposed a solution to this problem by providing a facility which allows one coroutine to suspend and then resume another coroutine symmetrically without consuming any additional stack-space.
+
+Gor Nishanov （2018）的论文 [P0913R0](https://wg21.link/P0913R0) “添加对称协程控制传输” 提出了一种解决此问题的方法，即提供一种允许一个协程暂停然后对称地恢复另一个协程而不消耗任何额外栈空间的设施。
+
+This paper proposed two key changes:
+
+- Allow returning a `std::coroutine_handle<T>` from `await_suspend()` as a way of indicating that execution should be symmetrically transferred to the coroutine identified by the returned handle.
+- Add a `std::experimental::noop_coroutine()` function that returns a special `std::coroutine_handle` that can be returned from `await_suspend()` to suspend the current coroutine and return from the call to `.resume()` instead of transferring execution to another coroutine.
+
+论文提出了两项关键的改变：
+
+- 允许从 `await_suspend() ` 返回 `std::coroutine_handle<T>` ，以指示执行流应该对称地转移到由返回的句柄标识的协程中。
+- 添加一个 `std::experimental::noop_coroutine()` 函数，该函数返回一个特殊的 `std::coroutine_handle` ，可以从 `await_suspend()` 返回该特殊函数，从而挂起当前协程并从对 `.resume()` 的调用返回，而不是将执行转移到另一个协程。
+
+So what do we mean by “symmetric transfer”?
+
+那么，我们所说的“对称转移”是什么意思呢？
+
+When you resume a coroutine by calling `.resume()` on it’s `std::coroutine_handle` the caller of `.resume()` remains active on the stack while the resumed coroutine executes. When this coroutine next suspends and the call to `await_suspend()` for that suspend-point returns either `void` (indicating unconditional suspend) or `true` (indicating conditional suspend) then call to `.resume()` will return.
+
+当你通过在 `std::coroutine_handle` 上调用 `.resume()` 来恢复协程时，当被恢复的协程执行时，`.resume()`  的调用方在栈上保持活动状态。当次协程下一次挂起
+
+并且对该挂起点的 `await_suspend()` 调用返回 `void` （表示无条件官气）或 `true` （表示有条件挂起），则将返回对 `.resume()` 的调用。
+
+This can be thought of as an “asymmetric transfer” of execution to the coroutine and behaves just like an ordinary function call. The caller of `.resume()` can be any function (which may or may not be a coroutine). When that coroutine suspends and returns either `true` or `void` from `await_suspend()` then execution will return from the call to `.resume()` and
+
+这可以看做是对协程执行的“非对称传输”，其行为和普通函数调用类似。`.resume()` 的调用者可以是任何函数（可以是也可以不是协程）。当协程挂起并从 `await_suspend()` 返回 `true` 和 `void` 时，执行将从对 `.resume()` 的调用返回。
+
+Every time we resume a coroutine by calling `.resume()` we create a new stack-frame for the execution of that coroutine.
+
+我们每次通过调用 `.resume()` 来恢复协程时，我们都会为协程的执行创建一个新的栈帧。
+
+However, with “symmetric transfer” we are simply suspending one coroutine and resuming another coroutine. There is no implicit caller/callee relationship between the two coroutines - when a coroutine suspends it can transfer execution to any suspended coroutine (including itself) and does not necessarily have to transfer execution back to the previous coroutine when it next suspends or completes.
+
+但是，通过“对称转移”，我们只是暂停一个协程并恢复另外一个协程。两个协程之间没有隐式的调用方/被调用方关系--当协程暂停时，它可以将执行转移到任何已暂停的协程（包括自身），并且不必再下一次暂停或完成时将执行转移回先前的协程。
+
+Let’s look at what the compiler lowers a `co_await` expression to when the awaiter makes use of symmetric-transfer:
+
+让我们来看一下，当 awaiter 使用对称传输时，编译器将 `co_await` 表达式降低到什么程度。
+
+```c++
+{
+    decltype(auto) value = <exper>;
+    decltype(auto) awaitable = 
+        get_awaitable(promise, static_cast<decltype(value)&&>(value));
+    decltype(auto) awaiter = 
+        get_awaiter(static_cast<decltype(awaitable)&&>(awaitable));
+    if(!awaiter.await_ready())
+    {
+        using handle_t = std::coroutine_handle<P>;
+        
+        //<suspend-coroutine>
+        auto h = awaiter.await_suspend(handle_t::from_promise(p));
+        h.resume();
+        //<return-to-caller-or-resume>
+        
+        //<resume-point>
+    }
+    
+    return awaiter.await_resume();
+}
+```
+
+Let’s zoom in on the key part that differs from other `co_await` forms:
+
+让我们放大与其他 `co_await` 形式不同的关键部分：
+
+```c++
+auto h = awaiter.await_suspend(handle_t::from_promise(p));
+h.resume();
+//<return-to-caller-or-resumer>
+```
+
+Once the coroutine state-machine is lowered (a topic for another post), the `<return-to-caller-or-resumer>` part basically becomes a `return;` statement which causes the call to `.resume()` that last resumed the coroutine to return to its caller.
+
+一旦协程状态机降低（另一篇文章的主体），`<return-to-caller-or-resume>` 部分基本上就变成了 `return;` 语句，它使最后一次恢复协程的 `.resume()` 调用返回到它的调用者。
+
+This means that we have the situation where we have a call to another function with the same signature, `std::coroutine_handle::resume()`, followed by a `return;` from the current function which is itself the body of a `std::coroutine_handle::resume()` call.
+
+这意味着我们会遇到这样一种情况，即调用另一个具有相同签名的函数， `std::coroutine_handle::resume()` ，从当前本身就是一个 `std::coroutine_handle::resume()` 调用的函数返回。
+
+Some compilers, when optimisations are enabled, are able to apply an optimisation that turns calls to other functions the tail-position (ie. just before returning) into tail-calls as long as some conditions are met.
+
+启用优化功能后，某些编译器可以应用优化功能，只要瞒住某些条件，就可以将对其他函数的调用从尾部位置（即在返回之前）转换为尾部调用。
+
+It just so happens that this kind of tail-call optimisation is exactly the kind of thing we want to be able to do to avoid the stack-overflow problem we were encountering before. But instead of being at the mercy of the optimiser as to whether or not the tail-call transformation is perfromed, we want to be able to guarantee that the tail-call transformation occurs, even when optimisations are not enabled.
+
+碰巧的是，这种类型的尾部调用优化恰恰是我们希望能够做的事情，它可以避免我们以前遇到的栈溢出的问题。但是，我们希望能够保证即使在未启用优化的情况下，也会发生尾部调用转换，而不是由优化程序来决定是否执行尾部调用转换。
+
+But first let’s dig into what we mean by tail-calls.
+
+但首先，让我们深入了解尾部调用的含义。
+
+### Tail-calls
+
+A tail-call is one where the current stack-frame is popped before the call and the current function’s return address becomes the return-address for the callee. ie. the callee will return directly the the caller of this function.
+
+尾部调用是在调用之前弹出当前的栈帧（被调用方），并把当前函数的返回地址变成被调用方的返回地址，即，被调用方直接将此函数返回给调用者。（调用者 --> 被调用方 --> 此函数）。
+
+On X86/X64 architectures this generally means that the compiler will generate code that first pops the current stack-frame and then uses a `jmp` instruction to jump to the called function’s entry-point instead of using a `call` instruction and then popping the current stack-frame after the `call` returns.
+
+在 X86/64 体系结构上，这通常意味着编译器将生成代码，该代码首先弹出当前栈帧，然后使用 `jmp` 指令跳转到被调用函数的入口点，而不是使用 `call` 指令，然后在 `call` 返回后弹出当前栈帧。
+
+This optimisation is generally only possible to do in limited circumstances, however.
+
+但是，这种优化通常只能在有限的情况下进行。
+
+In particular, it requires that:
+
+- the calling convention supports tail-calls and is the same for the caller and callee;
+- the return-type is the same;
+- there are no non-trivial destructors that need to be run after the call before returning to the caller; and
+- the call is not inside a try/catch block.
+
+特别是，它要求：
+
+- 调用约定支持尾部调用，对调用者和被调用者是相同的；
+- 返回类型相同；
+- 在返回到调用方之前，不需要在调用之后运行非平凡的析构函数；
+- 调用不在 try/catch 块中；
+
+The shape of the symmetric-transfer form of `co_await` has actually been designed specifically to allow coroutines to satisfy all of these requirements. Let’s look at them individually.
+
+实际上，对称转移形式的  `co_await` 的形状是经过专门设计的，以便协程可以满足这些要求。让我们单独看一下。
+
+**Calling convention** When the compiler lowers a coroutine into machine code it actually splits the coroutine up into two parts: the ramp (which allocates and initialises the coroutine frame) and the body (which contains the state-machine for the user-authored coroutine body).
+
+**Calling convention （调用约定）**。当编译器将协程编译为机器码时，它实际上将协程分为两个部分：ramp （斜坡）（分配和初始化协程帧）和主体（包含用户编写的协程主体的状态机）。
+
+The function signature of the coroutine (and thus any user-specified calling-convention) affects only the ramp part, whereas the body part is under the control of the compiler and is never directly called by any user-code - only by the ramp function and by `std::coroutine_handle::resume()`.
+
+协程的函数签名（以及任何用户指定的调用约定）只影响 ramp 部分，而主体部分由编译器控制，并且永远不会被任何用户代码直接调用--仅由 ramp 函数和 `std::coroutine_handle::resume()` 调用。
+
+The calling-convention of the coroutine body part is not user-visible and is entirely up to the compiler and thus it can choose an appropriate calling convention that supports tail-calls and that is used by all coroutine bodies.
+
+协程主体部分的调用约定不是用户可见的，完全取决于编译器，因此它可以选择支持尾部调用且所有协程主体都使用的合适的调用约定。
+
+**Return type is the same** The return-type for both the source and target coroutine’s `.resume()` method is `void` so this requirement is trivially satisfied.
+
+**Return type is the same（返回类型相同）**。 源协程和目标协程的 `.resume()` 方法的返回类型均是 `void` ，因此可以轻松满足此要求。
+
+**No non-trivial destructors** When performing a tail-call we need to be able to free the current stack-frame before calling the target function and this requires the lifetime of all stack-allocated objects to have ended prior to the call.
+
+**No non-trivial destructors（没有非平凡析构函数）**。当执行尾调用时，我们 需要能够在调用目标函数之前释放当前栈帧，这需要所有栈分配对象的生命周期在调用之前已经结束。
+
+Normally, this would be problematic as soon as there are any objects with non-trivial destructors in-scope as the lifetime of those objects would not yet have ended and those objects would have been allocated on the stack.
+
+通常，一旦作用域中存在任何具有非平凡析构函数的对象，就会出现问题，因为这些对象的生命周期还没有结束，而且这些对象已经在栈上分配了。
+
+However, when a coroutine suspends it does so without exiting any scopes and the way it achieves this is by placing any objects whose lifetime spans a suspend-point in the coroutine frame rather than allocating them on the stack.
+
+但是，当协程挂起时，它不会退出任何作用域，而实现这一点的方法是将任何生命周期跨越挂起点的对象放在协程帧中，而不是在栈中分配它们。
+
+Local variables with lifetimes that do not span a suspend-point may be allocated on the stack, but the lifetime of these objects will have already ended and their destructors will have been called before the coroutine next suspends.
+
+把生命周期不跨越挂起点的局部变量分配在栈上，在协程下次挂起之前，这些对象的生命周期已经结束并调用它们的析构函数。
+
+Thus there should be no non-trivial destructors for stack-allocated objects that need to be run after the return of the tail-call.
+
+因此，对于在尾调用返回之后需要运行的栈分配对象，不应该有非平凡析构函数。
+
+**Call not inside a try/catch block** This one is a little tricker as within every coroutine there is an implicit try/catch block that encloses the user-authored body of the coroutine.
+
+**Call not inside a try/catch block（不要在 try/catch 块中调用）**。这是一个技巧，因为每个协程中都有一个隐式的 try/catch 块，该块包围了用户编写的协程主体。 
+
+From the specification, we see that the coroutine is defined as:
+
+从规范中，我们可以看到协程的定义为：
+
+```c++
+{
+    promise_type promise;
+    co_await promise.initial_suspend();
+    try { F;}
+    catch(...) { promise.unhandled_exception(); }
+final_suspend:
+    co_await promise.final_suspend();
+}
+```
+
+Where `F` is the user-authored part of the coroutine body.
+
+其中 `F` 是用户编写的协程体的一部分。
+
+Thus every user-authored `co_await` expression (other than initial/final_suspend) exists within the context of a try/catch block.
+
+因此，每个用户编写的 `co_await` 表达式（除了 initial/final_suspend）都存在于 try/catch 块的上下文中。
+
+However, implementations work around this by actually executing the call to `.resume()` *outside* of the context of the try-block.
+
+但是，实现实际上是通过在 try 块的上下文之外执行对 `.resume()` 的调用来解决这个问题。
+
+I hope to be able to go into this aspect in more detail in another blog post that goes into the details of the lowering of a coroutine to machine-code (this post is already long enough).
+
+我希望能够在另一篇文章中更详细地讨论这方面的内容，其中涉及将协程编译成机器码的细节（这篇稳重已经够长了）。
+
+> *Note, however, that the current wording in the C++ specification is not clear on requiring implementations to do this and it is only a non-normative note that hints that this is something that might be required. Hopefully we’ll be able to fix the specification in the future.*
+
+> *然而，需要主要的是，在当前的 C++ 规范措辞中，并没有明确要求实现这样做，这只是一个非标准说明，暗示可能需要这样做。希望将来我们能够修复这个规范*
+
+So we see that coroutines performing a symmetric-transfer generally satisfy all of the requirements for being able to perform a tail-call. The compiler guarantees that this will always be a tail-call, regardless of whether optimisations are enabled or not.
+
+所以我们看到，执行对称传输的协程通常满足能够执行尾部调用的所有要求。编译器保证这将始终是一个尾部调用，而不管是否启用了优化。
+
+This means that by using the `std::coroutine_handle`-returning flavour of `await_suspend()` we can suspend the current coroutine and transfer execution to another coroutine without consuming extra stack-space.
+
+这意味着，通过使用 `std::coroutine_handle` 返回风格的 `await_suspend()` ，我们可以挂起当前的协程并将执行转移到另外一个协程，而无需占用额外的栈空间。
+
+This allows us to write coroutines that mutually and recursively resume each other to an arbitrary depth without fear of overflowing the stack.
+
+这使我们能编写协程，以相互递归的方式将彼此恢复到任意深度，而无需担心栈溢出。
+
+This is exactly what we need to fix our `task` implementation
+
+这正是我们解决 `task` 实现所需的。
+
+## `task` revisited
+
+So with the new “symmetric transfer” capability under our belt let’s go back and fix our `task` type implementation.
+
+因此，借助新的“对称传输”功能，让我们回过头来解决我们的 `task` 类型设施。
+
+To do this we need to make changes to the two `await_suspend()` methods in our implementation:
+
+- First so that when we await the task that we perform a symmetric-transfer to resume the task’s coroutine.
+- Second so that when the task’s coroutine completes that it performs a symmetric transfer to resume the awaiting coroutine.
+
+为此，我们需要在实现中对两个 `await_suspend()` 方法进行更改：
+
+- 首先，当我们等待 task 时，我们执行对称传输以恢复任务的协程。
+- 其次，当任务的协程完成时，他执行对称传输以恢复等待的协程。
+
+To address the await direction we need to change the `task::awaiter` method from this:
+
+为了解决等待方向，我们需要将 `task::awaiter` 从这样：
+
+```c++
+void task::awaiter::await_suspend(
+    std::coroutine_handle<> conitnuation) noexcept {
+    // Store the continuation in the task's promise so that the final_suspend()
+    // knows to resume this coroutine when the task completes.
+    coro_.promise().continuation = continuation;
+    
+    // The we resume the task's coroutine, which is currently suspended
+    // at the initial-suspend-point(ie, at the open curly brace).
+    coro_.resume();
+}
+```
+
+to this：
+
+改成这样
+
+```c++
+std::coroutine_handle<> task::awaiter::await_suspend(
+	std::coroutine_handle<> continuation) noexcept {
+    // Store the continuation in the task's promise so that the final_suspend()
+    // knows to resume this coroutine when the task complete.
+    
+    coro_.promise().continuation = continuation;
+    
+    // Then we tail-resume the task's coroutine, which is currently suspended
+    // at the initial-suspend-point(ie, at the open curly brace), by returning
+    // its handle from await_suspend().
+    return coro_;
+}
+```
+
+And to address the return-path we need to update the `task::promise_type::final_awaiter` method from this:
+
+为了解决 return-path（返回路径），我们需要更新 `task::promise_type::final_awaiter` 方法从这样：
+
+```c++
+void task::promise_type::final_awaiter::await_suspend(
+std::coroutine_handle<promise_type> h) noexcept {
+    // The coroutine is now suspended at the final-suspend point.
+    // Lookup its continuation in the promise and resume it.
+    h.promise().continuation.resume();
+}
+```
+
+to this:
+
+到这样：
+
+```c++
+std::coroutine_handle<> task::promise_type::final_awaiter::await_suspend(
+	std::coroutine_handle<promise_type> h) noexcept {
+    // The coroutine is now suspended at the final-suspend point.
+    // Lookup its continuation int the promise and resume it symmetrically.
+    return h.promise().continuation;
+}
+```
+
+And now we have a `task` implementation that doesn’t suffer from the stack-overflow problem that the `void`-returning `await_suspend` flavour had and that doesn’t have the non-deterministic resumption context problem of the `bool`-returning `await_suspend` flavour had.
+
+现在我们有了一个 `task` 的实现，它没有 `void` 返回风格的 `await_suspend` 所具有的栈溢出问题，也没有 `bool` 返回风格的 `await_suspend` 所具有的不确定性恢复上下文问题。
+
+### Visualising the stack
+
+Let’s now go back and have a look at our original example:
+
+现在，让我们回头看看原始示例：
+
+```c++
+task completes_synchronously() {
+    co_return;
+}
+
+task loop_synchronously(int count) {
+    for(int i = 0; i < count; ++i)
+        co_await completes_synchronously();
+}
+```
+
+When the `loop_synchronously()` coroutine first starts executing it will be because some other coroutine `co_await`ed the `task` returned. This will have been launched by symmetric transfer from some other coroutine, which would have been resumed by a call to `std::coroutine_handle::resume()`.
+
+当 `loop_synchronously()` 协程第一次开始执行时，它将因为 `co_await` 其他协程  等待 `task` 返回。这将通过从其他协程的对称传输启动，通过调用 `std::coroutine_handle::resume()` 而恢复。
+
+Thus the stack will look something like this when `loop_synchronously()` starts:
+
+因此，当 `loop_synchronously()` 启动时，栈将如下所示：
+
+```
+           Stack                                                Heap
++---------------------------+  <-- top of stack   +--------------------------+
+| loop_synchronously$resume | active coroutine -> | loop_synchronously frame |
++---------------------------+                     | +----------------------+ |
+| coroutine_handle::resume  |                     | | task::promise        | |
++---------------------------+                     | | - continuation --.   | |
+|     ...                   |                     | +------------------|---+ |
++---------------------------+                     | ...                |     |
+                                                  +--------------------|-----+
+                                                                       V
+                                                  +--------------------------+
+                                                  | awaiting_coroutine frame |
+                                                  |                          |
+                                                  +--------------------------+
+```
+
+Now, when it executes `co_await completes_synchronously()` it will perform a symmetric transfer to `completes_synchronously` coroutine.
+
+现在，当它执行 `co_await completes_synchronously()` 时，它将执行对称传输到 `completes_synchronously()` 协程。
+
+It does this by:
+
+- calling the `task::operator co_await()` which then returns the `task::awaiter` object
+- then suspends and calls `task::awaiter::await_suspend()` which then returns the `coroutine_handle` of the `completes_synchronously` coroutine.
+- then performs a tail-call / jump to `completes_synchronously` coroutine. This pops the `loop_synchronously` frame before activing the `completes_synchronously` frame.
+
+它通过以下方式做到这一点：
+
+- 调用 `task::operator co_await()` ，然后返回 `task::awaiter` 对象。
+- 然后挂起并调用`task::awaiter::await_suspend()` ，然后返回 `completes_synchronously` 协程的 `coroutine_handle`。
+- 然后执行 tail-call/jump 到 `completes_synchronously` 协程。这将在激活 `completes_synchronously` 帧之前弹出 `loop_synchronously` 帧。
+
+If we now look at the stack just after `completes_synchronously` is resumed it will now look like this:
+
+现在，如果我们在 `completes_synchronously` 恢复后立即查看栈，它看起来是这样的：
+
+```
+              Stack                                          Heap
+                                            .-> +--------------------------+ <-.
+                                            |   | completes_synchronously  |   |
+                                            |   | frame                    |   |
+                                            |   | +----------------------+ |   |
+                                            |   | | task::promise        | |   |
+                                            |   | | - continuation --.   | |   |
+                                            |   | +------------------|---+ |   |
+                                            `-, +--------------------|-----+   |
+                                              |                      V         |
++-------------------------------+ <-- top of  | +--------------------------+   |
+| completes_synchronously$resume|     stack   | | loop_synchronously frame |   |
++-------------------------------+ active -----' | +----------------------+ |   |
+| coroutine_handle::resume      | coroutine     | | task::promise        | |   |
++-------------------------------+               | | - continuation --.   | |   |
+|     ...                       |               | +------------------|---+ |   |
++-------------------------------+               | task temporary     |     |   |
+                                                | - coro_       -----|---------`
+                                                +--------------------|-----+
+                                                                     V
+                                                +--------------------------+
+                                                | awaiting_coroutine frame |
+                                                |                          |
+                                                +--------------------------+
+```
+
+Note that the number of stack-frames has not grown here.
+
+注意，此处的栈帧并未增加。
+
+After the `completes_synchronously` coroutine completes and execution reaches the closing curly brace it will evaluate `co_await promise.final_suspend()`.
+
+在 `completes_synchronously` 协程完成并且执行到大括号后，它将计算 `co_await promise.final_suspend()`。
+
+This will suspend the coroutine and call `final_awaiter::await_suspend()` which return the continuation’s `std::coroutine_handle` (ie. the handle that points to the `loop_synchronously` coroutine). This will then do a symmetric transfer/tail-call to resume the `loop_synchronously` coroutine.
+
+这将挂起协程并调用 `final_awaiter::await_suspend()` ，该函数返回延续的 `std::coroutine_handle` （即指向 `loop_synchronously` 协程的句柄）。然后，这将执行对称传输/尾调用去恢复 `loop_synchronously` 协程。
+
+If we look at the stack just after `loop_synchronously` is resumed then it will look something like this:
+
+如果我们在 `loop_synchronously` 恢复之后立即查看栈，那么它看起来像这样：
+
+```
+           Stack                                                   Heap
+                                                   +--------------------------+ <-.
+                                                   | completes_synchronously  |   |
+                                                   | frame                    |   |
+                                                   | +----------------------+ |   |
+                                                   | | task::promise        | |   |
+                                                   | | - continuation --.   | |   |
+                                                   | +------------------|---+ |   |
+                                                   +--------------------|-----+   |
+                                                                        V         |
++----------------------------+  <-- top of stack   +--------------------------+   |
+| loop_synchronously$resume  | active coroutine -> | loop_synchronously frame |   |
++----------------------------+                     | +----------------------+ |   |
+| coroutine_handle::resume() |                     | | task::promise        | |   |
++----------------------------+                     | | - continuation --.   | |   |
+|     ...                    |                     | +------------------|---+ |   |
++----------------------------+                     | task temporary     |     |   |
+                                                   | - coro_       -----|---------`
+                                                   +--------------------|-----+
+                                                                        V
+                                                   +--------------------------+
+                                                   | awaiting_coroutine frame |
+                                                   |                          |
+                                                   +--------------------------+
+```
+
+The first thing the `loop_synchronously` coroutine is going to do once resumed is to call the destructor of the temporary `task` that was returned from the call to `completes_synchronously` when execution reaches the semicolon. This will destroy the coroutine-frame, freeing its memory and leaving us with the following sitution:
+
+一旦恢复，`loop_synchronously` 协程要做的第一件事就是在执行到达分号，将从调用 `compeltes_synchronously` 返回的临时 `task` 的析构函数。这将销毁协程帧，释放其内存，并使我们出于如下状态：
+
+```
+           Stack                                                   Heap
++---------------------------+  <-- top of stack   +--------------------------+
+| loop_synchronously$resume | active coroutine -> | loop_synchronously frame |
++---------------------------+                     | +----------------------+ |
+| coroutine_handle::resume  |                     | | task::promise        | |
++---------------------------+                     | | - continuation --.   | |
+|     ...                   |                     | +------------------|---+ |
++---------------------------+                     | ...                |     |
+                                                  +--------------------|-----+
+                                                                       V
+                                                  +--------------------------+
+                                                  | awaiting_coroutine frame |
+                                                  |                          |
+                                                  +--------------------------+
+```
+
+We are now back to executing the `loop_synchronously` coroutine and we now have the same number of stack-frames and coroutine-frames as we started, and will do so each time we go around the loop.
+
+现在我们又回到执行 `loop_synchronously` 协程，并且现在我们拥有与开始时相同数量的栈帧和协程帧，并且每次循环时都会这么做。
+
+Thus we can perform as many iterations of the loop as we want and will only use a constant amount of storage space.
+
+因此，我们可以根据需要执行任意多次循环，并且仅使用恒定数量的存储空间。
+
+For a full example of the symmetric-transfer version of the `task` type see the following Compiler Explorer link: https://godbolt.org/z/9baieF.
+
+有关 `task` 类型的对称传输版本的完整示例，请参阅一下编译器资源管理器链接： https://godbolt.org/z/9baieF。
+
+## Symmetric Transfer as the Universal Form of await_suspend
+
+Now that we see the power and importance of the symmetric-transfer form of the awaitable concept, I want to show you that this form is actually the universal form, which can theoretically replace the `void` and `bool`-returning forms of `await_suspend()`.
+
+现在我们看到了对称转移形式的 awaitable 概念的威力和重要性，我想告诉你，这种形式实际上是一种普遍形式，理论上可以取代 `void` 和 `bool` 返回形式的 `await_suspend()`。
+
+But first we need to look at the other piece that the [P0913R0](https://wg21.link/P0913R0) proposal added to the coroutines design: `std::noop_coroutine()`.
+
+但是，首先我们需要看看 [P0913R0](https://wg21.link/P0913R0) 提案添加到协程设计中的另外一部分：`std::noop_coroutine()`
+
+### Terminating the recursion
+
+With the symmetric-transfer form of coroutines, every time the coroutine suspends it symmetrically resumes another coroutine. This is great as long as you have another coroutine to resume, but sometimes we don’t have another coroutine to execute and just need to suspend and let execution return to the caller of `std::coroutine_handle::resume()`.
+
+利用协程的对称传输形式，每次协程被对称地挂起时，都会对称地恢复另外一个协程。只要你还有另外一个协程要继续执行，这都是可以的，但是有时候我们没有另外一个协程要执行，只需要挂起并让执行返回到 `std::coroutine_handle::resume()` 的调用方。
+
+Both the `void`-returning and `bool`-returning flavours of `await_suspend()` allow a coroutine to suspend and return from `std::coroutine_handle::resume()`, so how do we do that with the symmetric-transfer flavour?
+
+`void` 和 `bool` 返回形式的 `await_suspend()` 都允许协程挂起并从 `std::coroutine_handle::resume()` 返回，那么如何使用对称传输风格的 `await_suspend()` 实现这一点呢？
+
+The answer is by using the special builtin `std::coroutine_handle`, called the “noop coroutine handle” which is produced by the function `std::noop_coroutine()`.
+
+答案是使用特殊的内置的 `std::coroutine_handle`，被称为 “noop coroutine handle”，它由 `std::noop_coroutine()` 函数生成。
+
+The “noop coroutine handle” is named as such because its `.resume()` implementation is such that it just immediately returns. i.e. resuming the coroutine is a no-op. Typically its implementation contains a single `ret` instruction.
+
+之所以成为 “noop coroutine handle”，是因为它的 `.resume()` 实现使它只会立即返回，即，恢复协程时是一个无操作的（no-op）。它的实现通常只包含一条 `ret` 指令。
+
+If the `await_suspend()` method returns the `std::noop_coroutine()` handle then instead of transferring execution to the next coroutine, it transfers execution back to the caller of `std::coroutine_handle::resume()`.
+
+如果 `await_suspend()` 方法返回 `std::noop_coroutine()` 句柄，那么它将执行传递回 `std::coroutine_handle::resume()` 的调用方，而不是将执行传递到下一个 协程。
+
+### Representing the other flavours of `await_suspend()`
+
+With this information in-hand we can now show how to represent the other flavours of `await_suspend()` using the symmetric-transfer form.
+
+有了这些信息，我们现在可以展示如何使用对称传输形式的 `await_suspend()`。
+
+The `void`-returning form
+
+`void` 返回形式：
+
+```c++
+void my_awaiter::await_suspend(std::coroutine_handle<> h) {
+    this->coro = h;
+    enqueue(this);
+}
+```
+
+can also be written using both the `bool`-returning form:
+
+也可以使用 `bool` 返回形式编写：
+
+```c++
+bool my_awaiter::await_suspend(std::coroutine_handle<> h) {
+    this->coro = h;
+    enqueue(this);
+    return true;
+}
+```
+
+and can be written using the symmetric-transfer form:
+
+并且也能使用对称传输形式编写：
+
+```c++
+std::noop_coroutine_handle my_awaiter::await_suspend(
+	std::coroutine_handle<> h) {
+    this->coro = h;
+    enqueue(this);
+    return std::noop_coroutine();
+}
+```
+
+The `bool`-returning form:
+
+`bool` 返回形式：
+
+```c++
+bool my_awaiter::await_suspend(std::coroutine_handle<> h) {
+    this->coro = h;
+    if(try_start(this)) {
+        // Operation will complete asynchronously.
+        // Return true to transfer execution on caller of
+        // coroutine_handle::resume().
+        return true;
+    }
+    
+    //Operation completed synchronously.
+    // Return false to immediately resume the current coroutine.
+    return false;
+}
+```
+
+can also be written using the symmetric-transfer form:
+
+也可以使用对称传输形式编写：
+
+```c++
+std::coroutine_handle<> my_awaiter::await_suspend(std::coroutine_handle<> h) {
+    this->coro = h;
+    if(try_start(this)) {
+        // Operation will complete asynchronously.
+        // Return std::noop_coroutine() to transfer exeution to caller of
+        // coroutine_handle::resume().
+        
+        return std::noop_coroutine();
+    }
+ 
+    // Operation completed synchronously.
+    // Return current coroutine's handle to immediately resume
+    // the current coroutine.
+    return h;
+}
+```
+
+### Why have all three flavours?
+
+So why do we still have the `void` and `bool`-returning flavours of `await_suspend()` when we have the symmetric-transfer flavour?
+
+那么，为什么当我们已经有了对称传输风格的 `await_suspend()` 时，我们仍然还有 `void` 和 `bool` 返回风格的 `await_suspend()` 呢。
+
+The reason is partly historical, partly pragmatic and partly performance.
+
+究其原因，一部分是历史原因，一部分是实用，还有一部分是性能。
+
+The `void`-returning version could be entirely replaced by returning the `std::noop_coroutine_handle` type from `await_suspend()` as this would be an equivalent signal to the compiler that the coroutine is unconditionally transfering execution to the caller of `std::coroutine_handle::resume()`.
+
+ 返回 `void` 的版本可以完全替换为从 `await_suspend()` 返回 `std::noop_coroutine_handle` 类型的版本，因为这相当于向编译器发出信号，表明协程正在无条件的将执行转移到 `std::coroutine_handle::resume()` 的调用方。
+
+That it was kept was, IMO, partly because it was already in-use prior to the introduction of symmetric-transfer and partly because the `void`-form results in less-code/less-typing for the unconditional suspend case.
+
+IMO 之所以保留它，部分是因为它在引入对称传输之前就已经在使用了，部分原因是因为 `void` 形式在无条件挂起时，拥有更少的代码。
+
+The `bool`-returning version, however, can have a slight win in terms of optimisability in some cases compared to the symmetric-transfer form.
+
+然而，在某些情况下，与对称传输形式相比，`bool` 返回版本在优化性方面可能稍有胜算。
+
+Consider the case where we have a `bool`-returning `await_suspend()` method that is defined in another translation unit. In this case the compiler can generate code in the awaiting coroutine that will suspend the current coroutine and then conditionally resume it after the call to `await_suspend()` returns by just executing the next piece of code. It knows exactly the piece of code to execute next if `await_suspend()` returns `false`.
+
+考虑这样一种情况，`bool` 返回形式的 `await_suspend()` 方法定义在另外一个翻译单元中。在这种情况下，编译器可以在等待的协程中生成代码，该协程将挂起当前协程，然后在调用 `await_suspend()` 返回后，仅执行下一段代码即可有条件的恢复它。如果 `await_suspend()` 返回 `false` ，它将确切知道接下来要执行的代码。
+
+With the symmetric-transfer flavour we still need to represent the same outcomes; either return to the caller/resume or resume the current coroutine. Instead of returning `true` or `false` we need to return `std::noop_coroutine()` or the handle to the current coroutine. We can coerce both of these handles into a `std::coroutine_handle<void>` type and return it.
+
+对于对称传输风格，我们仍然需要标识相同的结果；要么返回到调用者/恢复者，要么恢复当前的协程。代替返回`true` 或 `false` ，我们需要返回 `std::noop_coroutine()` 或当前协程的句柄。我们可以将这两个句柄强制转换为 `std::coroutine_handle<void>` 类型并返回它。
+
+However, now, because the `await_suspend()` method is defined in another translation unit the compiler can’t see what coroutine the returned handle is referring to and so when it resumes the coroutine it now has to perform some more expensive indirect calls and possibly some branches to resume the coroutine, compared to a single branch for the `bool`-returning case.
+
+但是，现在，由于 `await_suspend()` 方法是在另外一个翻译单元中定义的，编译器看不到返回的句柄所指的协程，因此当它恢复协程时，它现在必须执行一些更昂贵的间接调用，并可能需要一些分支来恢复协程，相比之下，`bool` 返回形式的情况只需要一个分支。
+
+Now, it’s possible that we might be able to get equivalent performance out of the symmetric transfer version one day. For example, we could write our code in such a way that `await_suspend()` is defined inline but calls a `bool`-returning method that is defined out-of-line and then conditionally returns the appropriate handle.
+
+现在，也许有一天我们可以从对称传输版本中获得同等的性能。例如，我们可以以如下方式编写代码：`await_suspend()` 是内联定义的，但是调用一个不是内联定义的 `bool` 返回形式的方法，然后有条件的返回适当的句柄。
+
+For example:
+
+例如
+
+```c++
+struc my_awaiter {
+    bool await_ready();
+    
+    // Compilers should in-theory be able to optimise this to the same
+    // as the bool-returning version, but currently don't do this optimisation.
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) {
+        if(try_start(h)) {
+            return std::noop_coroutine();
+        } else {
+            return h;
+        }
+    }
+    
+    void await_resume();
+private:
+    // This method is defined out-of-line in a separate translation unit.
+    bool try_start(std::coroutine_handle<> h);
+}
+```
+
+However, current compilers (c. Clang 10) are not currently able to optimise this to as efficient code as the equivalent `bool`-returning version. Having said that, you’re probably not going to notice the difference unless you’re awaiting this in a really tight loop.
+
+但是，当前的编译器（c. Clang 10）目前还不能将其优化为与等效的 `bool` 返回形式版本那样高效的代码。话虽如此，你可能不会注意到区别，除非你在一个非常紧密的循环中等待这个。
+
+So, for now, the general rule is:
+
+- If you need to unconditionally return to `.resume()` caller, use the `void`-returning flavour.
+- If you need to conditionally return to `.resume()` caller or resume current coroutine use the `bool`-returning flavour.
+- If you need to resume another coroutine use the symmetric-transfer flavour.
+
+因此，目前，一般规则是：
+
+- 如果需要无条件地返回给 `.resume()` 的调用者，请使用 `void` 返回风格的版本。
+- 如果需要有条件地返回给 `.resume()` 的调用者或恢复当前的协程，请使用 `bool` 返回风格的版本。
+- 如果需要恢复其他协程，请使用对称传输风格的版本。
+
+# Rounding out
+
+The new symmetric transfer capability added to coroutines for C++20 makes it much easier to write coroutines that recursively resume each other without fear of running into stack-overflow. This capability is key to making efficient and safe async coroutine types, such as the `task` one presented here.
+
+在 C++20 的协程中添加了新的对称传输功能，这使得编写递归地相互恢复的协程变得更加容易，而不用担心会遇到栈溢出。这种能力是创建高效、安全的异步协程类型的关键，例如本文提到的 `task`。
+
+This ended up being a much longer than expected post on symmetric transfer. If you made it this far, then thanks for sticking with it! I hope you found it useful.
+
+这是一个比预期长的多的关于对称传输的文章。如果你做到了这一步，那么谢谢你坚持下去。希望你觉得有用。
+
+In the next post, I’ll dive into understanding how the compiler transforms a coroutine function into a state-machine.
+
+在下一篇文章中，我将深入介绍编译器如何将协程函数转换为状态机的。
+
+# Thanks
+
+Thanks to Eric Niebler and Corentin Jabot for providing feedback on drafts of this post.
+
+感谢 Niebler 和 Corentin Jabot对本文草稿的反馈。
