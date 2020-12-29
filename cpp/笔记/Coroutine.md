@@ -1,5 +1,7 @@
 # Coroutine Theory （协程理论）
 
+- 原文地址：https://lewissbaker.github.io/2017/09/25/coroutine-theory
+
 This is the first of a series of posts on the [C++ Coroutines TS](http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/n4680.pdf), a new language feature that is currently on track for inclusion into the C++20 language standard.
 
 这是C++ Coroutine TS 系列文章的第一篇，C++ Coroutine TS 是一种新的语言特性，目前有望纳入C++ 20 语言标准。
@@ -30,42 +32,37 @@ A normal function can be thought of as having two operations: **Call** and **Ret
 
 The **Call** operation creates an activation frame, suspends execution of the calling function and transfers execution to the start of the function being called.
 
-**Call** 操作将会创建一个 activation frame，挂起( **suspends**)调用函数的执行，并将执行权转移到被调用函数的开头。
+**Call** 操作将会创建一个活动帧，挂起( **suspends**)调用函数的执行，并将执行流转移到被调用函数的开头。
 
 The **Return** operation passes the return-value to the caller, destroys the activation frame and then resumes execution of the caller just after the point at which it called the function.
 
-**Return** 操作将返回值(**return-value**)传递给函数的调用者，销毁 activation frame并将执行权交还给调用函数，调用函数从调用位置后恢复( **resumes** )执行。
+**Return** 操作将返回值(**return-value**)传递给调用者，销毁活动帧并将执行流交还给调用者，调用者从调用函数的位置后恢复执行。
 
 Let’s analyse these semantics a little more…
 
 让我们再分析一下这些语义。。。
 
-### Activation Frames（活动/活跃帧）
+### Activation Frames（活动帧）
 
 So what is this ‘activation frame’ thing?
 
-那么什么是“Activation Frames” 呢？
+那么什么是“活动帧” 呢？
 
 You can think of the activation frame as the block of memory that holds the current state of a particular invocation of a function. This state includes the values of any parameters that were passed to it and the values of any local variables.
 
-你可以将 activation frames 视为一个内存块，它维护了调用函数的当前状态。这些状态包括传递给它的所有的参数值和局部变量。
+你可以将活动帧视为一个内存块，它维护了调用函数的当前状态。这些状态包括传递给它的所有的参数值和局部变量。
 
 For “normal” functions, the activation frame also includes the return-address - the address of the instruction to transfer execution to upon returning from the function - and the address of the activation frame for the invocation of the calling function. You can think of these pieces of information together as describing the ‘continuation’ of the function-call. ie. they describe which invocation of which function should continue executing at which point when this function completes.
 
-对于“普通”函数而言，activation frames 还包含返回地址(**return-address**):
-
-- 从函数返回时，调用函数将要执行的下一条指令的地址
-- 调用函数的 activation frame 地址
-
-你可以认为这些信息一起描述了函数调用的 “continuation（继续性）”，即它们描述了当一个函数完成时，应该在哪个位置继续执行哪一个函数的调用。
+对于“普通”函数而言，活动帧还包含返回地址(**return-address**): \- 从函数返回时将执行流转移到的指令的地址 - 以及用于调用函数的活跃帧的地址。你可以认为这些信息一起描述了函数调用的 “continuation（延续）”，即它们描述了当一个函数完成时，应该在哪个位置继续执行哪一个函数的调用。
 
 With “normal” functions, all activation frames have strictly nested lifetimes. This strict nesting allows use of a highly efficient memory allocation data-structure for allocating and freeing the activation frames for each of the function calls. This data-structure is commonly referred to as “the stack”.
 
-对于“普通”函数来说，所有的 activation frames 都拥有严格的嵌套生命周期。这种严格的嵌套，允许使用高效的内存分配数据结构来为每个函数调用分配和释放activation frames。这种数据结构通常称为“栈”。
+对于“普通”函数来说，所有的活动帧都拥有严格的嵌套生命周期。这种严格的嵌套，允许使用高效的内存分配数据结构来为每个函数调用分配和释放活动帧。这种数据结构通常称为“栈”。
 
 When an activation frame is allocated on this stack data structure it is often called a “stack frame”.
 
-当一个 activation frame 被分配在栈上时，它通常被称为 “stack frame”。
+当一个活动帧被分配在栈上时，它通常被称为“栈帧”。
 
 This stack data-structure is so common that most (all?) CPU architectures have a dedicated register for holding a pointer to the top of the stack (eg. in X64 it is the `rsp` register).
 
@@ -73,35 +70,35 @@ This stack data-structure is so common that most (all?) CPU architectures have a
 
 To allocate space for a new activation frame, you just increment this register by the frame-size. To free space for an activation frame, you just decrement this register by the frame-size.
 
-当为一个新的 activation frame 申请空间时，你只需要将该寄存器按帧大小递增即可。要释放 activation frame 的空间时，只要将该寄存器按帧大小减小即可。
+当为一个新的活动帧申请空间时，你只需要将该寄存器按帧大小递增即可。要释放活动帧的空间时，只要将该寄存器按帧大小减小即可。
 
 ### The ‘Call’ Operation
 
 When a function calls another function, the caller must first prepare itself for suspension.
 
-当一个函数调用另外一个函数时，调用者(**Caller**) 必须先做好挂起自身的准备。
+当一个函数调用另外一个函数时，调用者(**Caller**) 必须首先为暂停自身执行做准备。
 
 This ‘suspend’ step typically involves saving to memory any values that are currently held in CPU registers so that those values can later be restored if required when the function resumes execution. Depending on the calling convention of the function, the caller and callee may coordinate on who saves these register values, but you can still think of them as being performed as part of the **Call** operation.
 
-“挂起（suspend）”步骤通常是将当前保存在 CPU 寄存器的值保存到内存中，以便在函数恢复执行时可以根据需要还原这些值。根据函数的调用约定，调用者（**Caller**）和被调用者（**Callee**）可以协调谁保存这些寄存器值，但是你仍可以将它们视为 **Call** 操作的一部分。
+“暂停”步骤通常是将当前保存在 CPU 寄存器的值保存到内存中，以便在函数恢复执行时可以根据需要还原这些值。取决于函数的调用约定，调用者和被调用者可以协商谁保存这些寄存器值，但是你仍可以将它们视为 **Call** 操作的一部分。
 
 The caller also stores the values of any parameters passed to the called function into the new activation frame where they can be accessed by the function.
 
-调用者还会将传递给被调用函数的任何参数值存储到新的 activation frame中，以便在被调用函数中访问。
+调用者还会将传递给被调用函数的任何参数值存储到新的活动帧中，以便在被调用函数中访问。
 
 Finally, the caller writes the address of the resumption-point of the caller to the new activation frame and transfers execution to the start of the called function.
 
-最后，调用者将自己的恢复点（resumption-point ）地址写入新的 activation frame，并将执行流转移到被调用函数的开头。
+最后，调用者将自己的恢复点地址写入新的活动帧，并将执行流转移到被调用函数的开头。
 
 In the X86/X64 architecture this final operation has its own instruction, the `call` instruction, that writes the address of the next instruction onto the stack, increments the stack register by the size of the address and then jumps to the address specified in the instruction’s operand.
 
-在 X86/X64 架构中，这个最后的操作有自己的执行，即 **Call** 指令，它将下一条指令地址写入栈顶部，按地址大小增加栈寄存器，然后跳转到指令操作数中指定的地址。
+在 X86/X64 架构中，这个最后的操作有自己的指令，即 `Call` 指令，它将下一条指令地址写入栈，按地址大小增加栈寄存器，然后跳转到指令操作数中指定的地址。
 
 ### The ‘Return’ Operation
 
 When a function returns via a `return`-statement, the function first stores the return value (if any) where the caller can access it. This could either be in the caller’s activation frame or the function’s activation frame (the distinction can get a bit blurry for parameters and return values that cross the boundary between two activation frames).
 
-当函数通过返回语句(return-statement)返回时，该函数会先将返回值（如果有）存储在调用者可以访问的地方。返回值可能存储在调用者或者函数的 activation frame 中（这样来区分，会让跨越两个activation frames的参数和返回值变得有点模糊）。
+当函数通过 `return` 语句返回时，该函数会先将返回值（如果有）存储在调用者可以访问的地方。返回值可能存储在调用者或者函数的活动帧中（这样来区分，会让跨越两个活动帧的参数和返回值变得有点模糊）。
 
 Then the function destroys the activation frame by:
 
@@ -109,11 +106,11 @@ Then the function destroys the activation frame by:
 - Destroying any parameter objects
 - Freeing memory used by the activation-frame
 
-然后，函数通过以下步骤销毁activation frame：
+然后，函数通过以下步骤销毁活动帧：
 
-- 销毁返回点范围内的所有局部变量。
+- 销毁返回点作用域内的所有局部变量。
 - 销毁所有的参数对象
-- 释放 activation frame 占用的内存
+- 释放活动帧使用的内存
 
 And finally, it resumes execution of the caller by:
 
@@ -122,62 +119,62 @@ And finally, it resumes execution of the caller by:
 
 最后，它通过以下方式恢复调用者的执行：
 
-- 将栈寄存器指针指向调用者的activation frame，并恢复任何可能被调用函数破坏的寄存器，来恢复调用者的activation frame。
+- 通过将栈寄存器设置为指向调用者的活动帧来恢复调用者的活动帧，并恢复任何可能被调用函数破坏的寄存器。
 - 跳转到 “**Call**” 操作期间，保存起来的调用者恢复点。
 
 Note that as with the ‘Call’ operation, some calling conventions may split the repsonsibilities of the ‘Return’ operation across both the caller and callee function’s instructions.
 
-注意，和 **Call** 操作一样，某些约定可能会在 **Caller** 和 **Callee** 之间划分 **Return** 操作的责任。
+注意，和 **Call** 操作一样，某些约定可能会在调用者和被调用者之间划分 **Return** 操作的责任。
 
 ## Coroutines
 
 Coroutines generalise the operations of a function by separating out some of the steps performed in the **Call** and **Return** operations into three extra operations: **Suspend**, **Resume** and **Destroy**.
 
-协程泛化了函数的操作，将 **Call** 和 **Return** 操作中执行的一些步骤，又新定义了三个额外的操作：**Suspend**，**Resume** 和 **Destroy**。
+协程泛化了函数的操作，将 **Call** 和 **Return** 操作中执行的一些步骤又分成了三个额外的操作：**Suspend**，**Resume** 和 **Destroy**。
 
 The **Suspend** operation suspends execution of the coroutine at the current point within the function and transfers execution back to the caller or resumer without destroying the activation frame. Any objects in-scope at the point of suspension remain alive after the coroutine execution is suspended.
 
-**Suspend** 操作可以在函数内部将协程挂起，并在不破坏 activation frame 的情况下将执行流交还给调用者或者resumer 。协程挂起后，挂起点内的所有对象仍然是可用的。
+**Suspend** 操作可以在函数内部将协程挂起，并在不破坏活动帧的情况下将执行流交还给调用者或者恢复者。协程挂起后，挂起点内的所有对象仍然是可用的。
 
 Note that, like the **Return** operation of a function, a coroutine can only be suspended from within the coroutine itself at well-defined suspend-points.
 
-注意，就像函数的 **Return** 操作，协程只能在定义好的暂停点处从协程内部暂停。
+注意，就像函数的 **Return** 操作，协程只能在定义好的暂停点、从协程内部暂停。
 
 The **Resume** operation resumes execution of a suspended coroutine at the point at which it was suspended. This reactivates the coroutine’s activation frame.
 
-**Resume** 操作恢复执行一个在挂起点挂起的协程。这将重新激活协程的 activation frame。
+**Resume** 操作恢复执行一个在挂起点挂起的协程。这将重新激活协程的活动帧。
 
 The **Destroy** operation destroys the activation frame without resuming execution of the coroutine. Any objects that were in-scope at the suspend point will be destroyed. Memory used to store the activation frame is freed.
 
-**Destroy** 操作销毁协程的 activation frame 并且不恢复协程的执行。挂起点范围内的所有对象都将被销毁。用于保存 activation frame 的内存也将被释放。
+**Destroy** 操作销毁协程的活动帧并且不恢复协程的执行。挂起点范围内的所有对象都将被销毁。用于保存活动帧的内存也将被释放。
 
 ### Coroutine activation frames
 
 Since coroutines can be suspended without destroying the activation frame, we can no longer guarantee that activation frame lifetimes will be strictly nested. This means that activation frames cannot in general be allocated using a stack data-structure and so may need to be stored on the heap instead.
 
-由于协程可以在不破坏 activation frame 的情况下被挂起，我们将不再保证 activation frame 的生命周期被严格嵌套。这意味着 activation frames 通常不能像以前一样保存在栈中，因此可能需要将其存储在堆中。
+由于协程可以在不破坏活动帧的情况下被挂起，我们不能再保证活动帧的生命周期被严格嵌套。这意味着活动帧通常不能像以前一样保存在栈中，因此可能需要将其存储在堆中。
 
 There are some provisions in the C++ Coroutines TS to allow the memory for the coroutine frame to be allocated from the activation frame of the caller if the compiler can prove that the lifetime of the coroutine is indeed strictly nested within the lifetime of the caller. This can avoid heap allocations in many cases provided you have a sufficiently smart compiler.
 
-如果编译器可以证明协程的生命周期确实严格嵌套在调用者的生命周期内，则 C++ Coroutine TS 中有一些规定允许从调用者的 activation frame 中为协程帧（ coroutine frame）分配内存。这样，许多情况下就可以避免从堆中分配内存了。
+如果编译器可以证明协程的生命周期确实严格嵌套在调用者的生命周期内，则 C++ Coroutine TS 中有一些规定允许从调用者的活动帧中为协程帧（coroutine frame）分配内存。这样，许多情况下就可以避免从堆中分配内存了。
 
 With coroutines there are some parts of the activation frame that need to be preserved across coroutine suspension and there are some parts that only need to be kept around while the coroutine is executing. For example, the lifetime of a variable with a scope that does not span any coroutine suspend-points can potentially be stored on the stack.
 
-对于协程来说，activation frame 的某些部分是需要在被挂起时保存，而有些部分只需要在协程执行时保持。例如，作用于内生命周期不跨越任何协程挂起点的变量可以保存在栈中。
+对于协程来说，活动帧的某些部分是需要在被挂起时保存的，而有些部分只需要在协程执行时保持就行。例如，作用域内生命周期不跨越任何协程挂起点的变量可以保存在栈中。
 
 You can logically think of the activation frame of a coroutine as being comprised of two parts: the ‘coroutine frame’ and the ‘stack frame’.
 
-你可以从逻辑上认为协程的 activation frame 包含 **coroutine frame** 和 **stack frame** 两部分。
+你可以从逻辑上认为协程的活动帧包含“协程帧”和“栈帧”两部分。
 
 The ‘coroutine frame’ holds part of the coroutine’s activation frame that persists while the coroutine is suspended and the ‘stack frame’ part only exists while the coroutine is executing and is freed when the coroutine suspends and transfers execution back to the caller/resumer.
 
-coroutine frame 维护了一部分协程的 activation frame，该 coroutine frame 在协程被挂起时仍然存在，而 stack frame 仅在协程执行时存在，在协程被挂起并将执行流转移到 Caller 和 resumer 时释放。
+“协程帧”维护了一部分协程的活动帧，协程帧在协程被挂起时仍然存在，而“栈帧”仅在协程执行时存在，在协程被挂起并将执行流转移到调用者/恢复者时被释放。
 
 ### The ‘Suspend’ operation
 
 The **Suspend** operation of a coroutine allows the coroutine to suspend execution in the middle of the function and transfer execution back to the caller or resumer of the coroutine.
 
-协程的 **Suspend** 操作允许协程协程在函数中间暂停执行，并将执行权交还给 协程的 caller 和 resumer。
+协程的 **Suspend** 操作允许协程在函数中间暂停执行，并将执行流交还给协程的调用者或恢复者。
 
 There are certain points within the body of a coroutine that are designated as suspend-points. In the C++ Coroutines TS, these suspend-points are identified by usages of the `co_await` or `co_yield` keywords.
 
@@ -190,50 +187,50 @@ When a coroutine hits one of these suspend-points it first prepares the coroutin
 
 当协程到达这些挂起点时，它通过以下步骤为以后恢复协程做准备：
 
-- 将寄存器中保存的值写入 coroutine frame。
-- 向协程的 coroutine frame 写入一个值，该值指示协程的挂起点。这使后续的 **Resume** 操作知道该从哪里恢复执行协程，或者让后续的 **Destroy** 操作知道哪些在范围内的值需要被销毁。
+- 将寄存器中保存的值写入协程帧。
+- 向协程帧中写入一个值，该值指示协程的挂起点。这使后续的 **Resume** 操作知道该从哪里恢复执行协程，或者让后续的 **Destroy** 操作知道在范围内的哪些值需要被销毁。
 
 Once the coroutine has been prepared for resumption, the coroutine is considered ‘suspended’.
 
-一旦协程准备完毕，协程就被认为是“suspended”的了。
+一旦协程为恢复做好了准备，协程就被认为是“挂起”的了。
 
 The coroutine then has the opportunity to execute some additional logic before execution is transferred back to the caller/resumer. This additional logic is given access to a handle to the coroutine-frame that can be used to later resume or destroy it.
 
-在执行流转回交给 caller 或 resume 之前，协程有机会执行一些其他逻辑。这些额外逻辑被用来访问 coroutine frame 的句柄，该句柄可以在以后用来恢复或销毁协程。
+在执行流转回交给调用者/恢复者之前，协程有机会执行一些其他逻辑。这些额外逻辑被用来访问协程帧的句柄，该句柄可以在以后用来恢复或销毁协程。
 
 This ability to execute logic after the coroutine enters the ‘suspended’ state allows the coroutine to be scheduled for resumption without the need for synchronisation that would otherwise be required if the coroutine was scheduled for resumption prior to entering the ‘suspended’ state due to the potential for suspension and resumption of the coroutine to race. I’ll go into this in more detail in future posts.
 
-这种在协程进入 “Suspended” 状态后执行逻辑的能力允许将协程调度到恢复状态，而不需要同步，如果协程在进入 “Suspended” 状态之前被调度到执行恢复操作，则将需要同步，这是因为协程有可能在挂起和恢复操作中产生潜在的竞争。我将在以后的文章中更详细地讨论这个问题。
+这种在协程进入“挂起的”状态后执行逻辑的能力允许将协程调度到恢复状态，而不需要同步，如果协程在进入 “挂起的” 状态之前被调度到执行恢复操作，则需要同步，这是因为协程有可能在挂起和恢复操作中产生潜在的竞争。我将在以后的文章中更详细地讨论这个问题。
 
 The coroutine can then choose to either immediately resume/continue execution of the coroutine or can choose to transfer execution back to the caller/resumer.
 
-协程可以选择立即恢复/继续执行协程，也可以选择将执行流转移到 caller 和 resumer。
+协程可以选择立即恢复/继续执行协程，也可以选择将执行流转移到调用者/恢复者。
 
 If execution is transferred to the caller/resumer the stack-frame part of the coroutine’s activation frame is freed and popped off the stack.
 
-如果执行流被转交到 caller / resumer，则释放协程 activation frame 的 stack-frame 部分，并将其从栈中弹出。
+如果执行流被转交到调用者/恢复者，则释放协程活动帧的栈帧部分，并将其从栈中弹出。
 
 ### The ‘Resume’ operation
 
 The **Resume** operation can be performed on a coroutine that is currently in the ‘suspended’ state.
 
-可以在当前处于 “Suspended” 状态的协程上执行**Resume** 操作。
+可以在当前处于“挂起”状态的协程上执行**Resume** 操作。
 
 When a function wants to resume a coroutine it needs to effectively ‘call’ into the middle of a particular invocation of the function. The way the resumer identifies the particular invocation to resume is by calling the `void resume()` method on the coroutine-frame handle provided to the corresponding **Suspend** operation.
 
-当一个函数想要恢复协程时，它需要“调用”协程的特定调用，也就是调用相应的 **Suspend** 操作的 coroutine-frame句柄提供的 `void resume()`方法。
+当一个函数想要恢复协程时，它需要有效地“调用”到特定函数调用中间。恢复者标识要恢复的特定调用的方式是通过在提供给相应的 **Suspend** 操作的协程帧句柄上调用 `void resume()`方法。
 
 Just like a normal function call, this call to `resume()` will allocate a new stack-frame and store the return-address of the caller in the stack-frame before transferring execution to the function.
 
-就像普通函数调用一样，调用 resume() 将会分配一个新的 stack-frame，并在将执行流交到该函数之前(`resume()`)将调用者的返回地址储存到 stack-frame中。
+就像普通函数调用一样，调用 `resume()` 将会分配一个新的栈帧，并在将执行流交到该函数之前将调用者的返回地址储存到栈帧中。
 
 However, instead of transferring execution to the start of the function it will transfer execution to the point in the function at which it was last suspended. It does this by loading the resume-point from the coroutine-frame and jumping to that point.
 
-但是，它不是将执行权移交到函数的开始，而是将执行权转移到上次的挂起点。这是通过从coroutine-frame加载恢复点并跳到这一点实现的。
+但是，它不是将执行流移交到函数的开始，而是将执行流转移到上次的挂起点。这是通过从协程帧加载恢复点并跳转到这一点实现的。
 
 When the coroutine next suspends or runs to completion this call to `resume()` will return and resume execution of the calling function.
 
-当协程下一次挂载或执行完毕时，这个对resume()的调用将返回并恢复对调用函数的执行。
+当协程接下来挂起或执行完毕时，调用 `resume()` 将返回并恢复对调用函数的执行。
 
 ### The ‘Destroy’ operation
 
@@ -247,15 +244,15 @@ This operation can only be performed on a suspended coroutine.
 
 The **Destroy** operation acts much like the **Resume** operation in that it re-activates the coroutine’s activation frame, including allocating a new stack-frame and storing the return-address of the caller of the **Destroy** operation.
 
-**Destroy** 操作与 **Resume** 操作非常相似，它会重新激活协程的 activation frame，包括分配新的 stack-frame和存储 **Destroy** 操作调用者的返回地址。 
+**Destroy** 操作与 **Resume** 操作非常相似，它会重新激活协程的活动帧，包括分配新的栈帧和存储 **Destroy** 操作调用者的返回地址。 
 
 However, instead of transferring execution to the coroutine body at the last suspend-point it instead transfers execution to an alternative code-path that calls the destructors of all local variables in-scope at the suspend-point before then freeing the memory used by the coroutine frame.
 
-然后，它不是将执行流移交给最后一次的挂起点，而是将执行权转交到另一个代码路径，该代码路径在挂起点作用域内调用所有局部变量的析构函数，然后释放协程帧使用的内存。
+然而，它不是将执行流移交给最后一次的挂起点，而是将执行权转交到另一个代码路径，该代码路径在挂起点作用域内调用所有局部变量的析构函数，然后释放协程帧使用的内存。
 
 Similar to the **Resume** operation, the **Destroy** operation identifies the particular activation-frame to destroy by calling the `void destroy()` method on the coroutine-frame handle provided during the corresponding **Suspend** operation.
 
-与 **Resume** 操作相似，**Destroy** 操作是通过调用处于 **Suspend** 的coroutine-frame句柄上提供的 `void destroy()` 函数销毁特定 activation-frame。
+与 **Resume** 操作相似，**Destroy** 操作通过在相应的 **Suspend** 操作过程中提供的协程帧句柄上调用 `void destroy()` 函数来标识要销毁特定活动帧。
 
 ### The ‘Call’ operation of a coroutine
 
@@ -269,11 +266,11 @@ However, rather than execution only returning to the caller when the function ha
 
 When performing the **Call** operation on a coroutine, the caller allocates a new stack-frame, writes the parameters to the stack-frame, writes the return-address to the stack-frame and transfers execution to the coroutine. This is exactly the same as calling a normal function.
 
-当在一个协程上执行 **Call** 操作时，调用者将分配一个新的 stack-frame，并将参数和调用者的返回地址写入 stack-frame，然后将执行流交给协程。这与调用一个普通函数完全相同。
+当在一个协程上执行 **Call** 操作时，调用者将分配一个新的栈帧，并将参数和调用者的返回地址写入栈帧，然后将执行流交给协程。这与调用一个普通函数完全相同。
 
 The first thing the coroutine does is then allocate a coroutine-frame on the heap and copy/move the parameters from the stack-frame into the coroutine-frame so that the lifetime of the parameters extends beyond the first suspend-point.
 
-协程要做的第一件事就是在堆中分配一个 coroutine-frame，然后将参数从stack-frame 复制/移动到 coroutine-frame，这样参数的生命周期就可以超出第一次的挂起点了。
+协程要做的第一件事就是在堆中分配一个协程帧，然后将参数从栈帧复制/移动到协程帧，这样参数的生命周期就可以超出第一次的挂起点了。
 
 ### The ‘Return’ operation of a coroutine
 
@@ -283,27 +280,27 @@ The **Return** operation of a coroutine is a little different from that of a nor
 
 When a coroutine executes a `return`-statement (`co_return` according to the TS) operation it stores the return-value somewhere (exactly where this is stored can be customised by the coroutine) and then destructs any in-scope local variables (but not parameters).
 
-当协程执行返回语句（TS规范中的 `co_return`）操作时，它会将返回值储存到某个地方（协程可以自定义这个值的存储位置），然后销毁作用域内的任何局部变量（不是参数）。
+当协程执行 `return` 语句（TS规范中的 `co_return`）操作时，它会将返回值储存到某个地方（协程可以自定义这个值的存储位置），然后销毁作用域内的任何局部变量（不是参数）。
 
 The coroutine then has the opportunity to execute some additional logic before transferring execution back to the caller/resumer.
 
-在将执行流转移到 caller/resumer 之前，协程可以执行一些额外的逻辑。
+在将执行流转移到调用者/恢复者之前，协程可以执行一些额外的逻辑。
 
 This additional logic might perform some operation to publish the return value, or it might resume another coroutine that was waiting for the result. It’s completely customisable.
 
-这些逻辑可以执行一些逻辑去发布返回值，或者恢复另外一个等待结果的协程。这是可自定义的。
+这些额外的逻辑可以执行一些操作去发布返回值，或者恢复另外一个等待结果的协程。这是可自定义的。
 
 The coroutine then performs either a **Suspend** operation (keeping the coroutine-frame alive) or a **Destroy** operation (destroying the coroutine-frame).
 
-然后协程可以执行 **Suspend** 操作（保持 coroutine-frame 存活）或者执行 **Destroy** 操作（销毁coroutine-frame）。
+然后协程可以执行 **Suspend** 操作（保持协程帧存活）或者执行 **Destroy** 操作（销毁协程帧）。
 
 Execution is then transferred back to the caller/resumer as per the **Suspend**/**Destroy** operation semantics, popping the stack-frame component of the activation-frame off the stack.
 
-之后，按照 **Suspend** /**Destroy** 操作语义将执行流转交回 caller/resumer，再从栈中弹出 activation-frame 的 stack-frame。
+之后，按照 **Suspend** /**Destroy** 操作语义将执行流转交回调用者/恢复者，再从栈中弹出活动帧的栈帧。
 
 It is important to note that the return-value passed to the **Return** operation is not the same as the return-value returned from a **Call** operation as the return operation may be executed long after the caller resumed from the initial **Call** operation.
 
-需要注意的是，传递给 **Return** 操作的返回值和从 **Call** 操作返回的返回值不相同，因为 **Return** 操作可能在 caller 从初始 **Call** 操作恢复很久之后才执行。
+需要注意的是，传递给 **Return** 操作的返回值和从 **Call** 操作返回的返回值是不一样的，因为 **Return** 操作可能在调用者从初始 **Call** 操作恢复很久之后才执行。
 
 ## An illustration
 
@@ -332,7 +329,7 @@ Before the call we have a situation that looks a bit like this:
 
 Then when `x(42)` is called, it first creates a stack frame for `x()`, as with normal functions.
 
-然后，当调用`x(42)`时，它像普通函数一样，先创建 `x()` 的 stack frame。
+然后，当调用`x(42)`时，它像普通函数一样，先创建 `x()` 的栈帧。
 
 ```
 	栈                     寄存器               堆
@@ -349,7 +346,7 @@ Then when `x(42)` is called, it first creates a stack frame for `x()`, as with n
 
 Then, once the coroutine `x()` has allocated memory for the coroutine frame on the heap and copied/moved parameter values into the coroutine frame we’ll end up with something that looks like the next diagram. Note that the compiler will typically hold the address of the coroutine frame in a separate register to the stack pointer (eg. MSVC stores this in the `rbp` register).
 
-然后，一旦协程 `x()`在堆上为协程分配了内存，并将参数值复制/移动到 coroutine frame 后，我们将得到类似于下一张图中的内容。注意，编译器通常会将coroutine frame的地址保存在单独记录栈顶指针的寄存器中（MSVC将保存在rbp寄存器中）。
+然后，一旦协程 `x()`在堆上为协程分配了内存，并将参数值复制/移动到协程帧后，我们将得到类似于下一张图中的内容。注意，编译器通常会将协程帧的地址保存在单独记录栈顶指针的寄存器中（MSVC将保存在rbp寄存器中）。
 
 ```
 	栈                     寄存器               	堆
@@ -387,7 +384,7 @@ If the coroutine `x()` then calls another normal function `g()` it will look som
 
 When `g()` returns it will destroy its activation frame and restore `x()`’s activation frame. Let’s say we save `g()`’s return value in a local variable `b` which is stored in the coroutine frame.
 
-当 `g()` 返回时，`g()` 的 activation frame将被销毁，然后恢复 `x()` 的 activation frame。假设我们将 `g()` 的返回值保存到一个存储在coroutine frame中的局部变量`b`  中。
+当 `g()` 返回时，`g()` 的活动帧将被销毁，然后恢复 `x()` 的活动帧。假设我们将 `g()` 的返回值保存到一个存储在协程帧中的局部变量`b`  中。
 
 ```
 	栈                     寄存器               	堆
@@ -404,11 +401,11 @@ When `g()` returns it will destroy its activation frame and restore `x()`’s ac
 
 If `x()` now hits a suspend-point and suspends execution without destroying its activation frame then execution returns to `f()`.
 
-如果 `x()` 执行到了挂起点，它将挂起并且不去销毁自己的 activation frame，然后将执行流交回 `f()`。
+如果 `x()` 执行到了挂起点，它将挂起并且不去销毁自己的活动帧，然后将执行流交回 `f()`。
 
 This results in the stack-frame part of `x()` being popped off the stack while leaving the coroutine-frame on the heap. When the coroutine suspends for the first time, a return-value is returned to the caller. This return value often holds a handle to the coroutine-frame that suspended that can be used to later resume it. When `x()` suspends it also stores the address of the resumption-point of `x()` in the coroutine frame (call it `RP` for resume-point).
 
-这将导致 `x()` 的stack-frame 部分从栈中弹出，同时将 coroutine frame 保留在堆中。当协程第一次挂起时，一个返回值将被返回给调用者。这个返回值通常包含被挂起协程的 coroutine-frame 的一个句柄，它可以被用来在之后恢复协程的执行。当 `x()` 被挂起时，它也会将 `x()` 的恢复点地址存储在 coroutine frame中（RP表示恢复点）。
+这将导致 `x()` 的栈帧部分从栈中弹出，同时将协程帧保留在堆中。当协程第一次挂起时，一个返回值将被返回给调用者。这个返回值通常维护被挂起协程的协程帧的一个句柄，它可以被用来在之后恢复协程的执行。当 `x()` 被挂起时，它也会将 `x()` 的恢复点地址存储在协程帧中（RP表示恢复点）。
 
 ```
 	栈                     寄存器               堆
@@ -432,7 +429,7 @@ The function that resumes the coroutine calls a `void resume(handle)` function t
 
 This creates a new stack-frame that records the return-address of the caller to `resume()`, activates the coroutine-frame by loading its address into a register and resumes execution of `x()` at the resume-point stored in the coroutine-frame.
 
-这将创建一个新的 stack-frame，它记录了调用者调用 `resume()` 时的地址 ，加载coroutine-frame 的地址到寄存器，找到存储在 coroutine-frame 中的恢复点，然后在此恢复执行 `x()`。
+这将创建一个新的栈帧，它记录了调用者调用 `resume()` 时的地址 ，加载协程帧的地址到寄存器，找到存储在协程帧中的恢复点，然后在此恢复执行 `x()`。
 
 ```
 	栈                     寄存器               	堆
@@ -463,8 +460,9 @@ In the next post I will go through the mechanics of the C++ Coroutines TS langua
 
 # C++ Coroutines: Understanding operator co_await
 
+- 原文地址：https://lewissbaker.github.io/2017/11/17/understanding-operator-co-await
 - 译文出自：[掘金翻译计划](https://github.com/xitu/gold-miner)
-- 本文永久链接：https://github.com/xitu/gold-miner/blob/master/TODO1/understanding-operator-co-await.md
+- 本文永久链接：https://github.com/xitu/gold-miner/blob/master/TODO1/understanding-operator-co-await.m
 - 译者：[7Ethan](https://github.com/7Ethan)
 
 In the previous post on [Coroutine Theory](https://lewissbaker.github.io/2017/09/25/coroutine-theory) I described the high-level differences between functions and coroutines but without going into any detail on syntax and semantics of coroutines as described by the C++ Coroutines TS ([N4680](http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/n4680.pdf)).
@@ -565,11 +563,11 @@ Note that whether or not the `co_await` operator can be applied to a type can de
 
 To be more specific where required I like to use the term **Normally Awaitable** to describe a type that supports the `co_await` operator in a coroutine context whose promise type does not have an `await_transform` member. And I like to use the term **Contextually Awaitable** to describe a type that only supports the `co_await` operator in the context of certain types of coroutines due to the presence of an `await_transform` method in the coroutine’s promise type. (I’m open to better suggestions for these names here…)
 
-为了在需要的地方更具体的表述，我喜欢使用术语 **Normally Awaitable** 来描述promise类型中没有 `await_transform` 成员的协程~~上下文中支持 `co_await` 运算符的~~类型。我喜欢使用术语 **Contextually Awaitable** 来描述一种协程类型~~，它在某些类型的协程的上下文中仅支持 `co_await` 运算符~~，它的 promise 类型中存在 `await_transform` 方法。（我乐意接受其他更贴切的名字。。。）。
+为了在需要的地方更具体的表述，我喜欢使用术语 **Normally Awaitable** 来描述协程上下文中 `co_await` 运算符作用的类型的promise类型中没有 `await_transform` 成员。我喜欢使用术语 **Contextually Awaitable** 来描述一种类型，该类型仅在某些类型的协程中支持“ co_await”运算符，因为协程的promise类型中存在“ await_transform”方法。（我乐意接受其他更贴切的名字。。。）。
 
 An **Awaiter** type is a type that implements the three special methods that are called as part of a `co_await` expression: `await_ready`, `await_suspend` and `await_resume`.
 
-**Awaiter** 类型是一种实现了三个特殊方法的类型：`await_read`， `await_suspend` 和 `await_resume`，它们是 `co_await` 表达式的一部分。
+**Awaiter** 类型是一种实现了三个特殊方法的类型：`await_ready`， `await_suspend` 和 `await_resume`，它们是 `co_await` 表达式的一部分。
 
 Note that I have shamelessly “borrowed” the term ‘Awaiter’ here from the C# `async` keyword’s mechanics that is implemented in terms of a `GetAwaiter()` method which returns an object with an interface that is eerily similar to the C++ concept of an **Awaiter**. See [this post](https://weblogs.asp.net/dixin/understanding-c-sharp-async-await-2-awaitable-awaiter-pattern) for more details on C# awaiters.
 
@@ -631,44 +629,49 @@ decltype(auto) get_awaiter(Awaitable&& awaitable)
 
 So, assuming we have encapsulated the logic for turning the `<expr>` result into an **Awaiter** object into the above functions then the semantics of `co_await <expr>` can be translated (roughly) as follows:
 
-因此，假设我们已经分装了将 `<expr>` 结果转换为 **Awaiter** 对象到上述函数中的逻辑，那么 `co_await <expr>` 的语义可以（大致）这样转换：
+因此，假设我们已经将 `<expr>` 结果转换为 **Awaiter** 对象的逻辑封装了到上述函数中，那么 `co_await <expr>` 的语义可以（大致）这样转换：
 
 ```c++
 {
-    auto&& value = <expr>;
-    auto&& awaitable = get_awaitable(promise,static_cast<decltype(value)>(value));
-    auto&& awaiter = get_awaiter(static_cast<decltype(awaitable)>(awaitable));
-    
-    if(!awaiter.await_ready())
+  auto&& value = <expr>;
+  auto&& awaitable = get_awaitable(promise, static_cast<decltype(value)>(value));
+  auto&& awaiter = get_awaiter(static_cast<decltype(awaitable)>(awaitable));
+  if (!awaiter.await_ready())
+  {
+    using handle_t = std::experimental::coroutine_handle<P>;
+
+    using await_suspend_result_t =
+      decltype(awaiter.await_suspend(handle_t::from_promise(p)));
+
+    <suspend-coroutine>
+
+    if constexpr (std::is_void_v<await_suspend_result_t>)
     {
-        using handle_t = std::experimental::coroutine_handle<P>;
-        using await_suspend_t = decltype(awaiter.await_suspend(handle_t::from_promise(p)));
-        <suspend-coroutine>
-         
-        if constexpr (std::is_void_v<await_suspend_result_t>)
-        {
-            awaiter.await_suspend(handle_t::from_promise(p));
-            <return-to-caller-or-resumer>
-        }
-        else
-        {
-            static_assert(
-            	std::is_same_v<await_suspend_result_t,bool>,
-                "await_suspend() must return 'void' or 'bool'.");
-            if(awaiter.await_suspend(handle_t::from_promise(p)))
-            {
-                <return-to-caller-or-resumer>
-            }
-        }
-        <resume-point>
+      awaiter.await_suspend(handle_t::from_promise(p));
+      <return-to-caller-or-resumer>
     }
-    return awaiter.await_resume();
+    else
+    {
+      static_assert(
+         std::is_same_v<await_suspend_result_t, bool>,
+         "await_suspend() must return 'void' or 'bool'.");
+
+      if (awaiter.await_suspend(handle_t::from_promise(p)))
+      {
+        <return-to-caller-or-resumer>
+      }
+    }
+
+    <resume-point>
+  }
+
+  return awaiter.await_resume();
 }
 ```
 
 The `void`-returning version of `await_suspend()` unconditionally transfers execution back to the caller/resumer of the coroutine when the call to `await_suspend()` returns, whereas the `bool`-returning version allows the awaiter object to conditionally resume the coroutine immediately without returning to the caller/resumer.
 
-当 `await_suspend()` 的调用返回时，`await_suspend()` 的返回值为 `void` 的版本无条件地将执行转移回协程的调用者/恢复者，而返回值为 `bool` 的版本允许  awaiter 对象有条件地返回并立即恢复协程，而不是返回调用者/恢复者。
+当 `await_suspend()` 的调用返回时，`await_suspend()` 的返回值为 `void` 的版本无条件地将执行转移回协程的调用者/恢复者，而返回值为 `bool` 的版本允许  awaiter 对象有条件地立即恢复协程，而不返回调用者/恢复者。
 
 The `bool`-returning version of `await_suspend()` can be useful in cases where the awaiter might start an async operation that can sometimes complete synchronously. In the cases where it completes synchronously, the `await_suspend()` method can return `false` to indicate that the coroutine should be immediately resumed and continue execution.
 
@@ -676,7 +679,7 @@ The `bool`-returning version of `await_suspend()` can be useful in cases where t
 
 At the `<suspend-coroutine>` point the compiler generates some code to save the current state of the coroutine and prepare it for resumption. This includes storing the location of the `<resume-point>` as well as spilling any values currently held in registers into the coroutine frame memory.
 
-在 `<suspend-coroutine>` 处，编译器生成一些代码来保存协程的当前状态并准备恢复。这包括存储 `<resume-point>` 的断点位置，以及将当前保存在寄存器中的任何值溢出到协程帧内容中。
+在 `<suspend-coroutine>` 处，编译器生成一些代码来保存协程的当前状态并准备恢复。这包括存储 `<resume-point>` 的断点位置，以及将当前保存在寄存器中的任何值到协程帧内存中。
 
 The current coroutine is considered suspended after the `<suspend-coroutine>` operation completes. The first point at which you can observe the suspended coroutine is inside the call to `await_suspend()`. Once the coroutine is suspended it is then able to be resumed or destroyed.
 
@@ -692,7 +695,7 @@ The purpose of the `await_ready()` method is to allow you to avoid the cost of t
 
 At the `<return-to-caller-or-resumer>` point execution is transferred back to the caller or resumer, popping the local stack frame but keeping the coroutine frame alive.
 
-在 `<return-to-caller-or-resumer>` 断点处执行转移回调用者或恢复者，弹出本地栈帧但是保持协程帧。
+在 `<return-to-caller-or-resumer>` 断点处执行流转移回调用者或恢复者，弹出本地栈帧但是保持协程帧。
 
 When (or if) the suspended coroutine is eventually resumed then the execution resumes at the `<resume-point>`. ie. immediately before the `await_resume()` method is called to obtain the result of the operation.
 
@@ -710,7 +713,7 @@ Note that if an exception propagates out of the `await_suspend()` call then the 
 
 You may have noticed the use of the `coroutine_handle<P>` type that is passed to the `await_suspend()` call of a `co_await` expression.
 
-你可能已经注意到 `coroutine-handle<P>` 类型的使用，该类型被传递给 `co_await` 表达式的 `await_suspend()` 调用。
+你可能已经注意到 `coroutine_handle<P>` 类型的使用，该类型被传递给 `co_await` 表达式的 `await_suspend()` 调用。
 
 This type represents a non-owning handle to the coroutine frame and can be used to resume execution of the coroutine or to destroy the coroutine frame. It can also be used to get access to the coroutine’s promise object.
 
@@ -761,7 +764,7 @@ The `.promise()` method returns a reference to the coroutine’s promise object.
 
 The `coroutine_handle<P>::from_promise(P& promise)` function allows reconstructing the coroutine handle from a reference to the coroutine’s promise object. Note that you must ensure that the type, `P`, exactly matches the concrete promise type used for the coroutine frame; attempting to construct a `coroutine_handle<Base>` when the concrete promise type is `Derived` can lead to undefined behaviour.
 
-`coroutine_handle<P>::from_promise(P& promise)` 函数允许从对协程的 promise 对象的引用重构协程句柄。注意，你必须确保类型 `P` 与用于协程帧的具体 promise 类型完全匹配；当具体的 promise 类型时 `Derived` 时，试图通过 `coroutine_handle<Base>` 类型构造协程句柄将会出现未定义行为的错误。
+`coroutine_handle<P>::from_promise(P& promise)` 函数允许从对协程的 promise 对象的引用重构协程句柄。注意，你必须确保类型 `P` 与用于协程帧的具体 promise 类型完全匹配；当具体的 promise 类型是 `Derived` 时，试图通过 `coroutine_handle<Base>` 类型构造协程句柄将会出现未定义行为的错误。
 
 The `.address()` / `from_address()` functions allow converting a coroutine handle to/from a `void*` pointer. This is primarily intended to allow passing as a ‘context’ parameter into existing C-style APIs, so you might find it useful in implementing **Awaitable** types in some circumstances. However, in most cases I’ve found it necessary to pass additional information through to callbacks in this ‘context’ parameter so I generally end up storing the `coroutine_handle` in a struct and passing a pointer to the struct in the ‘context’ parameter rather than using the `.address()` return-value.
 
@@ -775,7 +778,7 @@ One of the powerful design-features of the `co_await` operator is the ability to
 
 This allows an Awaiter object to initiate an async operation after the coroutine is already suspended, passing the `coroutine_handle` of the suspended coroutine to the operation which it can safely resume when the operation completes (potentially on another thread) without any additional synchronisation required.
 
-这允许 Awaiter 对象在协程已经被挂起后发起异步操作，将被挂起的协程的句柄 `coroutine_handle` 传递给运算符，当操作完成时（可能在另外一个线程上）它可以安全地恢复协程，而不需要额外的同步。
+这允许 Awaiter 对象在协程已经被挂起后发起异步操作，将被挂起的协程的句柄 `coroutine_handle` 传递给操作，当操作完成时（可能在另外一个线程上）它可以安全地恢复协程，而不需要额外的同步。
 
 For example, by starting an async-read operation inside `await_suspend()` when the coroutine is already suspended means that we can just resume the coroutine when the operation completes without needing any thread-synchronisation to coordinate the thread that started the operation and the thread that completed the operation.
 
@@ -821,7 +824,7 @@ I want to take a quick detour to compare this ability of the Coroutines TS stack
 
 With many of the stackful coroutine frameworks, the suspend operation of a coroutine is combined with the resumption of another coroutine into a ‘context-switch’ operation. With this ‘context-switch’ operation there is typically no opportunity to execute logic after suspending the current coroutine but before transferring execution to another coroutine.
 
-对于许多有栈协程框架，一个协程的挂起操作与另一个协程的恢复操作相结合，形成一个“context-switch（上下文切换）”操作。使用这种“context-switch”操作，通常在当前协程挂起后，而在将执行转移到另外一个协程之前，没有机会执行逻辑。
+对于许多有栈协程框架，一个协程的挂起操作与另一个协程的恢复操作相结合，形成一个“context-switch（上下文切换）”操作。使用这种“context-switch”操作，通常在当前协程挂起后，而在将执行流转移到另外一个协程之前，没有机会执行逻辑。
 
 This means that if we want to implement a similar async-file-read operation on top of stackful coroutines then we have to start the operation *before* suspending the coroutine. It is therefore possible that the operation could complete on another thread before the coroutine is suspended and is eligible for resumption. This potential race between the operation completing on another thread and the coroutine suspending requires some kind of thread synchronisation to arbitrate and decide on the winner.
 
@@ -887,23 +890,25 @@ Example usage should look something like this:
 T value;
 async_manual_reset_event event;
 
-//A single call to produce a value
+// A single call to produce a value
 void producer()
 {
-    value = some_long_running_computation();
-    //Publish the value by setting the event.
-    event.set();
+  value = some_long_running_computation();
+
+  // Publish the value by setting the event.
+  event.set();
 }
 
-// Support multiple concurrent consumers
+// Supports multiple concurrent consumers
 task<> consumer()
 {
-    // Wait until the event is signalled by call to event.set() in the producer() function.
-    co_await event;
-    
-    // Now it's sage to consume 'value'
-    // This is guaranteed to 'happen after' assignment to 'value'
-    std::cout << value << std::endl;
+  // Wait until the event is signalled by call to event.set()
+  // in the producer() function.
+  co_await event;
+
+  // Now it's safe to consume 'value'
+  // This is guaranteed to 'happen after' assignment to 'value'
+  std::cout << value << std::endl;
 }
 ```
 
@@ -917,7 +922,7 @@ When it’s in the ‘not set’ state there is a (possibly empty) list of waiti
 
 When it’s in the ‘set’ state there won’t be any waiting coroutines as coroutines that `co_await` the event in this state can continue without suspending.
 
-当它处于 “set” 状态时，不会有任何等待的协程，因为在状态下， `co_await` 的事件可以继续执行不用暂停。
+当它处于 “set” 状态时，不会有任何等待的协程，因为在该状态下， `co_await` 的事件可以继续执行不用暂停。
 
 This state can actually be represented in a single `std::atomic<void*>`.
 
@@ -926,7 +931,7 @@ This state can actually be represented in a single `std::atomic<void*>`.
 
 这个状态实际上可以用一个 `std::atomic<void*>` 来表示。
 
-- 为 “set” 状态保留一个特殊的指针值。在这种情况下，我们将使用事件的 `this` 指针，因为我们知道该地址不会与任何列表项相同的地址。
+- 为 “set” 状态保留一个特殊的指针值。在这种情况下，我们将使用事件的 `this` 指针，因为我们知道该地址不会与任何列表项的地址相同。
 - 否则，事件处于 “not set” 状态，并且该值是指向等待协程的单链表结构的头部指针。
 
 We can avoid extra calls to allocate nodes for the linked-list on the heap by storing the nodes within an ‘awaiter’ object that is placed within the coroutine frame.
@@ -941,27 +946,31 @@ So let’s start with a class interface that looks something like this:
 class async_manual_reset_event
 {
 public:
+
   async_manual_reset_event(bool initiallySet = false) noexcept;
-    
-    // No copying/moving
-    async_manual_reset_event(const async_manual_reset_event&) = delete;
-    async_manual_reset_event(async_manual_reset_event&&) = delete;
-    async_manual_reset_event& operator=(const async_manual_reset_event&) = delete;
-    async_manual_reset_event& operator(async_manual_reset_event&&) = delete;
-    
-    bool is_set() const noexcept;
-    
-    struct awaiter;
-    awaiter operator co_await() const noexcept;
-    
-    void set() noexcept;
-    void reset() noexcept;
+
+  // No copying/moving
+  async_manual_reset_event(const async_manual_reset_event&) = delete;
+  async_manual_reset_event(async_manual_reset_event&&) = delete;
+  async_manual_reset_event& operator=(const async_manual_reset_event&) = delete;
+  async_manual_reset_event& operator=(async_manual_reset_event&&) = delete;
+
+  bool is_set() const noexcept;
+
+  struct awaiter;
+  awaiter operator co_await() const noexcept;
+
+  void set() noexcept;
+  void reset() noexcept;
+
 private:
-    friend struct awaiter;
-    
-    // - 'this' => set state
-    // - otherwise => not set, head of linked list of awaiter*.
-    mutable std::atomic<void*> m_state;
+
+  friend struct awaiter;
+
+  // - 'this' => set state
+  // - otherwise => not set, head of linked list of awaiter*.
+  mutable std::atomic<void*> m_state;
+
 };
 ```
 
@@ -1038,32 +1047,34 @@ Then once we’ve done that we need to try and atomically enqueue the awaiter on
 
 ```c++
 bool async_manual_reset_event::awaiter::await_suspend(
-	std::experimental::coroutine_handle<> awaitingCoroutine) noexcept
+  std::experimental::coroutine_handle<> awaitingCoroutine) noexcept
 {
-    //Special m_state value that indicates the event is in the 'set' state
-    const void* const setState = &m_event;
-    
-    // Remember the handle of the awaiting coroutine.
-    m_awaitingCoroutine = awaitingCoroutine;
-    
-    // Try to atomically push this awaiter onto the front of the list
-    void* oldValue = m_evnet.m_state.load(std::memory_order_acquire);
-    do
-    {
-        // Resume immediately if already in 'set' state
-        if(oldValue == setState) return false;
-        m_next = static_cast<awaiter*>(oldValue);
-        
-        // Finally, try to swap the old list head, inserting this awaiter as the new list head.
-    }
-    while(!m_event.m_state.compare_exchange_weak(
-    	oldValue,
-    	this,
-    	std::memory_order_release,
-    	std::memory_order_acquire));
-    
-    // Successfully enqueued. Remain suspended.
-    return true;
+  // Special m_state value that indicates the event is in the 'set' state.
+  const void* const setState = &m_event;
+
+  // Remember the handle of the awaiting coroutine.
+  m_awaitingCoroutine = awaitingCoroutine;
+
+  // Try to atomically push this awaiter onto the front of the list.
+  void* oldValue = m_event.m_state.load(std::memory_order_acquire);
+  do
+  {
+    // Resume immediately if already in 'set' state.
+    if (oldValue == setState) return false; 
+
+    // Update linked list to point at current head.
+    m_next = static_cast<awaiter*>(oldValue);
+
+    // Finally, try to swap the old list head, inserting this awaiter
+    // as the new list head.
+  } while (!m_event.m_state.compare_exchange_weak(
+             oldValue,
+             this,
+             std::memory_order_release,
+             std::memory_order_acquire));
+
+  // Successfully enqueued. Remain suspended.
+  return true;
 }
 ```
 
@@ -1121,26 +1132,26 @@ With the `set()` method, we want to transition to the ‘set’ state by exchang
 ```c++
 void async_manual_reset_event::set() noexcept
 {
-    // Needs to be 'release' so that subsequent 'co_await' has
-    // visibility of our prior writes.
-    // Needs to be 'acquire' so that we have visibility of prior
-    // writes by awaiting coroutines.
-    void* oldValue = m_state.exchange(this, std::memory_order_acq_rel);
-    if(oldValue != this)
+  // Needs to be 'release' so that subsequent 'co_await' has
+  // visibility of our prior writes.
+  // Needs to be 'acquire' so that we have visibility of prior
+  // writes by awaiting coroutines.
+  void* oldValue = m_state.exchange(this, std::memory_order_acq_rel);
+  if (oldValue != this)
+  {
+    // Wasn't already in 'set' state.
+    // Treat old value as head of a linked-list of waiters
+    // which we have now acquired and need to resume.
+    auto* waiters = static_cast<awaiter*>(oldValue);
+    while (waiters != nullptr)
     {
-        // Wasn't already in 'set' state
-        // Treat old value as head of a linked-list of waiters.
-        // which we hava now acquired and need to resume
-        auto* waiters = static_cast<awaiter*>(oldValue);
-        while(waiters != nullptr)
-        {
-            // Read m_next befor resuming the coroutine as resuming
-            // the coroutine will likely destroy the awaiter object.
-            auto* next = waiters->m_next;
-            waiters->m_awaitingCoroutine.resume();
-            waiters = next;
-        }
+      // Read m_next before resuming the coroutine as resuming
+      // the coroutine will likely destroy the awaiter object.
+      auto* next = waiters->m_next;
+      waiters->m_awaitingCoroutine.resume();
+      waiters = next;
     }
+  }
 }
 ```
 
@@ -1196,6 +1207,8 @@ And also to Eric Niebler for reviewing and providing feedback on an early draft 
 
 # C++ Coroutines: Understanding the promise type
 
+原文地址：https://lewissbaker.github.io/2018/09/05/understanding-the-promise-type
+
 Sep 5, 2018
 
 This post is the third in the series on the C++ Coroutines TS ([N4736](http://wg21.link/N4736)).
@@ -1203,9 +1216,6 @@ This post is the third in the series on the C++ Coroutines TS ([N4736](http://wg
 这是C++ Coroutine TS （N4736）系列文章的第三篇。
 
 The previous articles in this series cover:
-
-- [Coroutine Theory](https://lewissbaker.github.io/2017/09/25/coroutine-theory)
-- [Understanding operator co_await](https://lewissbaker.github.io/2017/11/17/understanding-operator-co-await)
 
 本系列的前几篇文章分别是：
 
@@ -1224,11 +1234,11 @@ Coroutine TS 中新添了三个关键字：`co_await`，`co_yield` 和 `co_retur
 
 The compiler applies some fairly mechanical transformations to the code that you write to turn it into a state-machine that allows it to suspend execution at particular points within the function and then later resume execution.
 
-编译器会对你编写的代码就行一些相当机械的转换，以将其转换成状态机，从而使其可以在函数内特定地方挂起，然后在恢复执行。
+编译器会对你编写的代码就行一些相当机械的转换，以将其转换成状态机，从而使其可以在函数内特定地方挂起，然后在稍后恢复执行。
 
 In the previous post I described the first of two new interfaces that the Coroutines TS introduces: The **Awaitable** interface. The second interface that the TS introduces that is important to this code transformation is the **Promise** interface.
 
-在前一篇文章中，我介绍了 Coroutine TS 引入的两个新接口中的第一个：**Awaitable** 接口。第二个接口是在 TS 描述中
+在前一篇文章中，我介绍了 Coroutine TS 引入的两个新接口中的第一个：**Awaitable** 接口。TS 引入的第二个接口 **Promise** 接口，它对代码转换很重要。
 
 The **Promise** interface specifies methods for customising the behaviour of the coroutine itself. The library-writer is able to customise what happens when the coroutine is called, what happens when the coroutine returns (either by normal means or via an unhandled exception) and customise the behaviour of any `co_await` or `co_yield` expression within the coroutine.
 
@@ -1331,7 +1341,7 @@ Once execution propagates outside of the coroutine body then the coroutine frame
 
 1. 调用 promise 对象的析构函数
 2. 调用函数参数副本的析构函数
-3. 调用 `operator new` 释放协程帧使用的内存（可选）
+3. 调用 `operator delete` 释放协程帧使用的内存（可选）
 4. 将执行权转交给调用方/恢复方。
 
 When execution first reaches a `<return-to-caller-or-resumer>` point inside a `co_await` expression, or if the coroutine runs to completion without hitting a `<return-to-caller-or-resumer>` point, then the coroutine is either suspended or destroyed and the return-object previously returned from the call to `promise.get_return_object()` is then returned to the caller of the coroutine.
@@ -1354,7 +1364,7 @@ There are a few important things to note here:
 
 The size passed to `operator new` is not `sizeof(P)` but is rather the size of the entire coroutine frame and is determined automatically by the compiler based on the number and sizes of parameters, size of the promise object, number and sizes of local variables and other compiler-specific storage needed for management of coroutine state.
 
-传递给 `operator new`  的大小不是 `sizeof(P)`  的大小而是整个协程帧的大小，编译器会根据参数的数量和大小，promise 对象的大小，局部变量的数量和大小以及其他管理协程状态所必须的编译器存储自动决定大小。
+传递给 `operator new`  的大小不是 `sizeof(P)`  的大小而是整个协程帧的大小，编译器会根据参数的数量和大小、promise 对象的大小、局部变量的数量和大小以及其他管理协程状态所必须的编译器存储自动决定大小。
 
 The compiler is free to elide the call to `operator new` as an optimisation if:
 
@@ -1430,37 +1440,42 @@ For example:
 template<typename ALLOCATOR>
 struct my_promise_type
 {
-    template<typename... ARGS>
-    void* operator new(std::size_t sz, std::allocator_arg_t, ALLOCATOR& allocator, ARGS&... args)
-    {
-        //Round up sz next multiple of ALLOCATOR alignment
-        std::size_t allocatorOffset = (sz + alignof(ALLOCATOR) - 1u) & ~(alignof(ALLOCATOR) - 1u);
-        
-        // Callonto allocator to allocate space for coroutine frame.
-        void* ptr = allocator.allocate(allocatorOffset + sizeof(ALLOCATOR));
-        
-        // Take a copy of the allocator(assuming noexcept copy constructor here)
-        new (((char*)ptr) + allocatroOffset) ALLOCATOR(allocator);
-        
-        return ptr;
-    }
-    
-    void operator delete(void* ptr, std::size_t sz)
-    {
-        std::size_t allocatorOffset = (sz + alignof(ALLOCATOR) - 1u) & ~(alignof(ALLOCATOR) -1u);
-        ALLOCATOR& allocator = *reinterpret_cast<ALLOCATOR*>(((char*)prt) + allocatorOffset);
-        
-        // Move allocator to local variable first so it isn't freeing its own memory from underneath itself.
-        // Assuming allocator move constructor is noexcept here.
-        ALLOCATOR allocatorCopy = std::move(allocator);
-        
-        // But don't forget to destruct allocator object in coroutine frame.
-        allocator.~ALLOCATOR();
-        
-        // Finally, free the memory using the allocator.
-        allocatorCopy.deallocate(ptr, allocatorOffset + sizeof(ALLOCATOR));
-    }
-};
+  template<typename... ARGS>
+  void* operator new(std::size_t sz, std::allocator_arg_t, ALLOCATOR& allocator, ARGS&... args)
+  {
+    // Round up sz to next multiple of ALLOCATOR alignment
+    std::size_t allocatorOffset =
+      (sz + alignof(ALLOCATOR) - 1u) & ~(alignof(ALLOCATOR) - 1u);
+
+    // Call onto allocator to allocate space for coroutine frame.
+    void* ptr = allocator.allocate(allocatorOffset + sizeof(ALLOCATOR));
+
+    // Take a copy of the allocator (assuming noexcept copy constructor here)
+    new (((char*)ptr) + allocatorOffset) ALLOCATOR(allocator);
+
+    return ptr;
+  }
+
+  void operator delete(void* ptr, std::size_t sz)
+  {
+    std::size_t allocatorOffset =
+      (sz + alignof(ALLOCATOR) - 1u) & ~(alignof(ALLOCATOR) - 1u);
+
+    ALLOCATOR& allocator = *reinterpret_cast<ALLOCATOR*>(
+      ((char*)ptr) + allocatorOffset);
+
+    // Move allocator to local variable first so it isn't freeing its
+    // own memory from underneath itself.
+    // Assuming allocator move-constructor is noexcept here.
+    ALLOCATOR allocatorCopy = std::move(allocator);
+
+    // But don't forget to destruct allocator object in coroutine frame
+    allocator.~ALLOCATOR();
+
+    // Finally, free the memory using the allocator.
+    allocatorCopy.deallocate(ptr, allocatorOffset + sizeof(ALLOCATOR));
+  }
+}
 ```
 
 To hook up the custom `my_promise_type` to be used for coroutines that pass `std::allocator_arg` as the first parameter, you need to specialise the `coroutine_traits` class (see section on `coroutine_traits` below for more details).
@@ -1548,20 +1563,21 @@ You can think of the control flow going something (very roughly) like this:
 // Pretend there's a compiler-generated structure called 'coroutine_frame'
 // that holds all of the state needed for the coroutine. It's constructor
 // takes a copy of parameters and default-constructs a promise object.
-struct coroutine_frame{...};
+struct coroutine_frame { ... };
 
 T some_coroutine(P param)
 {
-    auto* f = new coroutine_frame(std::forward<P>(param));
-    auto returnObject = f->promise.get_return_object();
-    
-    // Start execution of the coroutine body by resume it.
-    // This call will return when the coroutine gets to the first
-    // suspend-point or when the coroutine runs to completion.
-    coroutine_handle<decltype(f->promise)>::from_promise(f->promise).resume();
-    
-    // Then the return object is returned to the caller.
-    return returnObject;
+  auto* f = new coroutine_frame(std::forward<P>(param));
+
+  auto returnObject = f->promise.get_return_object();
+
+  // Start execution of the coroutine body by resuming it.
+  // This call will return when the coroutine gets to the first
+  // suspend-point or when the coroutine runs to completion.
+  coroutine_handle<decltype(f->promise)>::from_promise(f->promise).resume();
+
+  // Then the return object is returned to the caller.
+  return returnObject;
 }
 ```
 
@@ -1585,7 +1601,7 @@ If the coroutine suspends at the initial suspend point then it can be later resu
 
 The result of the `co_await promise.initial_suspend()` expression is discarded so implementations should generally return `void` from the `await_resume()` method of the awaiter.
 
-`co_await promise.initial_suspend()` 表达式的记过将被丢弃，因此 awaiter 的`await_resume()` 实现通常返回 `void`。
+`co_await promise.initial_suspend()` 表达式的结果将被丢弃，因此 awaiter 的`await_resume()` 实现通常返回 `void`。
 
 It is important to note that this statement exists outside of the `try`/`catch` block that guards the rest of the coroutine (scroll back up to the definition of the coroutine body if you’ve forgotten what it looks like). This means that any exception thrown from the `co_await promise.initial_suspend()` evaluation prior to hitting its `<return-to-caller-or-resumer>` will be thrown back to the caller of the coroutine after destroying the coroutine frame and the return object.
 
@@ -1625,22 +1641,12 @@ When the coroutine reaches a `co_return` statement, it is translated into either
 
 The rules for the translation are as follows:
 
+转换规则如下：
+
 - `co_return;`
   -> `promise.return_void();`
 - `co_return <expr>;`
   -> `<expr>; promise.return_void();` if `<expr>` has type `void`
-  -> `promise.return_value(<expr>);` if `<expr>` does not have type `void`
-
-转换规则如下：
-
-- `co_reutrn;`
-
-  -> `promise.return_void();`
-
-- `co_return <expr> `
-
-  -> `<expr>; promise.return_void(); `if `<expr>` has type `void`
-
   -> `promise.return_value(<expr>);` if `<expr>` does not have type `void`
 
 The subsequent `goto FinalSuspend;` causes all local variables with automatic storage duration to be destructed in reverse order of construction before then evaluating `co_await promise.final_suspend();`.
@@ -1743,7 +1749,7 @@ For example, if you have the following methods:
 
 ```c++
 task<void> my_class::method1(int x) const;
-task<foo> my_class::method2()&&;
+task<foo> my_class::method2() &&;
 ```
 
 编译器将使用下面的 promise 类型：
@@ -1751,6 +1757,7 @@ task<foo> my_class::method2()&&;
 ```c++
 // method1 promise type
 typename coroutine_traits<task<void>, const my_class&, int>::promise_type;
+
 // method2 promise type
 typename coroutine_traits<task<foo>, my_class&&>::promise_type;
 ```
@@ -1786,7 +1793,7 @@ struct task
 
 However, for coroutine return-types that you don’t have control over you can specialise the `coroutine_traits` to define the promise type to use without needing to modify the type.
 
-然而，对于你无法控制的协程返回类型，你可以特化 `coroutine_traits` 来定义要是用的 promise 类型，而无需修改类型。
+然而，对于你无法控制的协程返回类型，你可以特化 `coroutine_traits` 来定义要适用的 promise 类型，而无需修改类型。
 
 For example, to define the promise-type to use for a coroutine that returns `std::optional<T>`:
 
@@ -1820,47 +1827,48 @@ The (abbreviated) interface of this type is as follows:
 ```c++
 namespace std::experimental
 {
-    template<typename Promise = void>
-    struct coroutine_handle;
-    
-      // Type-erased coroutine handle. Can refer to any kind of coroutine.
+  template<typename Promise = void>
+  struct coroutine_handle;
+
+  // Type-erased coroutine handle. Can refer to any kind of coroutine.
   // Doesn't allow access to the promise object.
-    template<>
-    struct coroutine_handle
-    {
-       // Constructs to the null handle;
-        constexpr coroutine_handle();
-        
-        // Convert to/from a void* for passing into C-strle interop functions.
-        constexpr void* address() const noexcept;
-        static constexpr coroutine_handle from_address(void* addr);
-        
-        // Query if the handle is non-null.
-        constexpr explicit operator bool() const noexcept;
-        
-        // Query if the coroutine is suspended at the final_suspend point.
-        //Undefined behaviour if coroutine is not currently suspend.
-        bool done() const;
-        
-        //Resume/Destroy the suspend coroutine
-        void resume();
-        void destroy();
-    };
-    
-    // Coroutine handle for coroutines with a known promise type.
-    // Template argument must exactly match coroutine's promise type.
-    template<typename Promise>
-    struct coroutine_thandle : coroutine_handle<>
-    {
-        using coroutine_handle<>::coroutine_handle;
-        static constexpr coroutine_handle from_address(void* addr);
-        
-        // Access to the coroutine's promise object.
-        Promise& promise() const;
-        
-        // You can reconstruct the coroutine handle from the promise object.
-        static coroutine_handle from_promise(Promise& promise);
-    };
+  template<>
+  struct coroutine_handle<void>
+  {
+    // Constructs to the null handle.
+    constexpr coroutine_handle();
+
+    // Convert to/from a void* for passing into C-style interop functions.
+    constexpr void* address() const noexcept;
+    static constexpr coroutine_handle from_address(void* addr);
+
+    // Query if the handle is non-null.
+    constexpr explicit operator bool() const noexcept;
+
+    // Query if the coroutine is suspended at the final_suspend point.
+    // Undefined behaviour if coroutine is not currently suspended.
+    bool done() const;
+
+    // Resume/Destroy the suspended coroutine
+    void resume();
+    void destroy();
+  };
+
+  // Coroutine handle for coroutines with a known promise type.
+  // Template argument must exactly match coroutine's promise type.
+  template<typename Promise>
+  struct coroutine_handle : coroutine_handle<>
+  {
+    using coroutine_handle<>::coroutine_handle;
+
+    static constexpr coroutine_handle from_address(void* addr);
+
+    // Access to the coroutine's promise object.
+    Promise& promise() const;
+
+    // You can reconstruct the coroutine handle from the promise object.
+    static coroutine_handle from_promise(Promise& promise);
+  };
 }
 ```
 
@@ -1894,7 +1902,7 @@ promise 类型能定义出现在协程体内的每一个 `co_await` 表达式的
 
 By simply defining a method named `await_transform()` on the promise type, the compiler will then transform every `co_await <expr>` appearing in the body of the coroutine into `co_await promise.await_transform(<expr>)`.
 
-通过简单的在 promise 类上定义一个 `await_transform()` 方法，编译器就会将协程体内的每一个 `co_await <expr>` 转换成 `co_await promise.await_transform(<expr>)` 。 
+简单的通过在 promise 类上定义一个 `await_transform()` 方法，编译器就会将协程体内的每一个 `co_await <expr>` 转换成 `co_await promise.await_transform(<expr>)` 。 
 
 This has a number of important and powerful uses:
 
@@ -1912,21 +1920,22 @@ For example, a promise type for coroutines with a `std::optional<T>` return-type
 template<typename T>
 class optional_promise
 {
-    ...
-    template<typename U>
-    auto await_transform(std::optional<U>& value)
+  ...
+
+  template<typename U>
+  auto await_transform(std::optional<U>& value)
+  {
+    class awaiter
     {
-        class awaiter
-        {
-            std::optional<U>& value;
-        public:
-            explicit awaiter(std::optional<U>& x) noexcept :vlaue(x) {}
-            bool await_ready() noexcept {return value.has_value();}
-            void await_suspend(std::experimental::coroutine_handle<>) noexcept {}
-            U& await_resume() noexcept { return * value}
-        };
-        return awaiter{value};
-    }
+      std::optional<U>& value;
+    public:
+      explicit awaiter(std::optional<U>& x) noexcept : value(x) {}
+      bool await_ready() noexcept { return value.has_value(); }
+      void await_suspend(std::experimental::coroutine_handle<>) noexcept {}
+      U& await_resume() noexcept { return *value; }
+    };
+    return awaiter{ value };
+  }
 };
 ```
 
